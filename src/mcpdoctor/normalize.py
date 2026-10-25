@@ -45,6 +45,7 @@ def scrub(value: Any, scrubbers: list[Scrubber]) -> Any:
         return [scrub(item, scrubbers) for item in value]
     return value
 
+
 # --- Ignore paths -----------------------------------------------------------
 
 _Token = tuple[str, Any]  # ("key", name) | ("all", None) | ("index", n)
@@ -77,6 +78,7 @@ def parse_path(path: str) -> list[_Token]:
         raise ValueError(f"path must end with a key: {path!r}")
     return tokens
 
+
 def _remove(value: Any, tokens: list[_Token]) -> Any:
     kind, arg = tokens[0]
     rest = tokens[1:]
@@ -102,6 +104,7 @@ def remove_paths(value: Any, paths: list[str]) -> Any:
     for path in paths:
         value = _remove(value, parse_path(path))
     return value
+
 
 # --- Sorting lists ----------------------------------------------------------
 

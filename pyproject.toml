@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-doctor"
 version = "0.1.0"
-description = "A checkup for MCP servers: inspect, test, lint and benchmark."
+description = "A checkup for MCP servers: inspect, test and lint."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -34,3 +34,6 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

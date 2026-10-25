@@ -11,15 +11,16 @@ class CallRecord(BaseModel):
     The client creates one per call, and the runner, linter, reporters and snapshots
     all read from it. Records serialize to JSON, one per line in JSONL sessions.
 
-
     Use `.text` to read the text content of `result`. To change a record, build a new one.
     """
-    model_config = ConfigDict(frozen=True,extra="forbid")
-    tool: str #Name of the tool that was called.
-    arguments: dict[str, Any] #Arguments sent to the tool, as a JSON-style dict.
-    result: Any #The server's response, either a string or a list of content blocks.
-    is_error: bool = False #True if the server reported the call as failed. Defaults to False.
-    latency_ms: float = Field(ge=0, allow_inf_nan=False) #Time the call took, in milliseconds.
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool: str  # Name of the tool that was called.
+    arguments: dict[str, Any]  # Arguments sent to the tool, as a JSON-style dict.
+    result: Any  # The server's response, either a string or a list of content blocks.
+    is_error: bool = False  # True if the server reported the call as failed.
+    latency_ms: float = Field(ge=0, allow_inf_nan=False)  # Call time, in milliseconds.
 
     @property
     def text(self) -> str:

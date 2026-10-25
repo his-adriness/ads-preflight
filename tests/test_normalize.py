@@ -1,4 +1,4 @@
-"""Tests for scrub().
+"""Tests for the normalize module: scrub, parse_path, remove_paths, sort_lists, normalize.
 
 Each test docstring has three parts:
   What:     the behavior being checked
