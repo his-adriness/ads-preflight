@@ -73,3 +73,29 @@ def parse_path(path: str) -> list[_Token]:
     if not tokens or tokens[-1][0] != "key":
         raise ValueError(f"path must end with a key: {path!r}")
     return tokens
+
+def _remove(value: Any, tokens: list[_Token]) -> Any:
+    kind, arg = tokens[0]
+    rest = tokens[1:]
+    if kind == "key":
+        if not isinstance(value, dict) or arg not in value:
+            return value
+        if not rest:
+            return {k: v for k, v in value.items() if k != arg}
+        return {**value, arg: _remove(value[arg], rest)}
+    if not isinstance(value, list):
+        return value
+    if kind == "all":
+        return [_remove(item, rest) for item in value]
+    # kind == "index"
+    return [_remove(item, rest) if i == arg else item for i, item in enumerate(value)]
+
+
+def remove_paths(value: Any, paths: list[str]) -> Any:
+    """Return a copy of value with every key matching one of the paths removed.
+
+    Paths that match nothing are ignored. The input is never modified.
+    """
+    for path in paths:
+        value = _remove(value, parse_path(path))
+    return value
