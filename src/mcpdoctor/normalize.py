@@ -41,3 +41,35 @@ def scrub(value: Any, scrubbers: list[Scrubber]) -> Any:
     if isinstance(value, list):
         return [scrub(item, scrubbers) for item in value]
     return value
+
+# --- Ignore paths -----------------------------------------------------------
+
+_Token = tuple[str, Any]  # ("key", name) | ("all", None) | ("index", n)
+
+_TOKEN_RE = re.compile(r"\.(?P<key>[^.\[\]]+)|\[(?P<star>\*)\]|\[(?P<index>\d+)\]")
+
+
+def parse_path(path: str) -> list[_Token]:
+    """Parse a path like '$.items[*].updated_at' into tokens.
+
+    Supports: '.key', '[*]' (every list item) and '[0]' (one list item).
+    The last step must be a key, because only dict keys can be removed.
+    """
+    if not path.startswith("$"):
+        raise ValueError(f"path must start with '$': {path!r}")
+    tokens: list[_Token] = []
+    pos = 1
+    while pos < len(path):
+        match = _TOKEN_RE.match(path, pos)
+        if match is None:
+            raise ValueError(f"invalid path {path!r} at position {pos}")
+        if match.group("key") is not None:
+            tokens.append(("key", match.group("key")))
+        elif match.group("star") is not None:
+            tokens.append(("all", None))
+        else:
+            tokens.append(("index", int(match.group("index"))))
+        pos = match.end()
+    if not tokens or tokens[-1][0] != "key":
+        raise ValueError(f"path must end with a key: {path!r}")
+    return tokens
