@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
+from mcpdoctor.models import CallRecord
 
 Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
 
@@ -143,3 +143,29 @@ def sort_lists(value: Any, paths: list[str]) -> Any:
     for path in paths:
         value = _sort_at(value, parse_path(path))
     return value
+
+
+# --- Normalizing a record ---------------------------------------------------
+
+
+def normalize(
+    record: CallRecord,
+    *,
+    scrubbers: list[Scrubber] | None = None,
+    ignore: list[str] | None = None,
+    sort: list[str] | None = None,
+) -> CallRecord:
+    """Return a copy of record whose result is cleaned for fair comparison.
+
+    Steps, in this order: remove the `ignore` paths, scrub volatile strings, then
+    sort the lists at the `sort` paths. Sorting is last so that lists are ordered
+    by their final, stable content and not by values that change on every run.
+
+    scrubbers: None uses DEFAULT_SCRUBBERS. An empty list turns scrubbing off.
+    Only `result` changes. The input record is never modified.
+    """
+    result = record.result
+    result = remove_paths(result, ignore or [])
+    result = scrub(result, DEFAULT_SCRUBBERS if scrubbers is None else scrubbers)
+    result = sort_lists(result, sort or [])
+    return CallRecord.model_validate({**record.model_dump(), "result": result})

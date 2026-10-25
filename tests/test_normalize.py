@@ -6,12 +6,14 @@ Each test docstring has three parts:
   Expected: the output that counts as a pass
 """
 
+
 import copy
 import re
 
 import pytest
 
-from mcpdoctor.normalize import parse_path, remove_paths, scrub, sort_lists
+from mcpdoctor.models import CallRecord
+from mcpdoctor.normalize import normalize, parse_path, remove_paths, scrub, sort_lists
 
 DIGITS = [(re.compile(r"\d+"), "<N>")]
 
@@ -871,3 +873,296 @@ def test_sort_lists_makes_runs_that_differ_only_in_order_equal():
     second = {"notes": [{"id": 3, "t": "c"}, {"id": 1, "t": "a"}, {"id": 2, "t": "b"}]}
     assert first != second
     assert sort_lists(first, ["$.notes"]) == sort_lists(second, ["$.notes"])
+
+
+# --- normalize: building a cleaned record -----------------------------------
+
+
+def make_record(**overrides):
+    """Build a valid CallRecord, overriding only the fields a test cares about."""
+    data = {
+        "tool": "search_notes",
+        "arguments": {"query": "meeting"},
+        "result": "ok",
+        "is_error": False,
+        "latency_ms": 12.5,
+    }
+    data.update(overrides)
+    return CallRecord(**data)
+
+
+def text_result(text):
+    """A result shaped like a real MCP response: a list with one text block."""
+    return [{"type": "text", "text": text}]
+
+
+def test_normalize_returns_a_new_callrecord():
+    """Return a CallRecord that is a different object.
+
+    What:     The output is a valid CallRecord and not the input object.
+    Why:      Records are frozen and shared. Callers need a fresh one to compare.
+    Expected: isinstance(out, CallRecord) and out is not record
+    """
+    record = make_record()
+    out = normalize(record)
+    assert isinstance(out, CallRecord)
+    assert out is not record
+
+
+def test_normalize_scrubs_the_result_with_the_default_scrubbers():
+    """Replace UUIDs and timestamps in the result by default.
+
+    What:     With no options, volatile values inside the result are replaced.
+    Why:      The common case should work without any setup.
+    Expected: .text == "created <UUID> at <TIMESTAMP>"
+    """
+    record = make_record(
+        result=text_result("created f81d4fae-7dec-11d0-a765-00a0c91e6bf6 at 2026-10-25T14:30:00Z")
+    )
+    assert normalize(record).text == "created <UUID> at <TIMESTAMP>"
+
+
+def test_normalize_removes_the_ignored_paths():
+    """Drop the fields named in ignore.
+
+    What:     The keys at the ignore paths are gone from the result.
+    Why:      Fields with no recognizable shape (request IDs, ETags) need removing by
+              location.
+    Expected: {"request_id": "r1", "n": 1} with ignore=["$.request_id"] becomes
+              {"n": 1}
+    """
+    record = make_record(result={"request_id": "r1", "n": 1})
+    assert normalize(record, ignore=["$.request_id"]).result == {"n": 1}
+
+
+def test_normalize_sorts_the_listed_lists():
+    """Sort the lists named in sort.
+
+    What:     The list at the sort path comes back in order.
+    Why:      Unordered collections must not cause false differences.
+    Expected: {"tags": ["b", "a"]} with sort=["$.tags"] becomes {"tags": ["a", "b"]}
+    """
+    record = make_record(result={"tags": ["b", "a"]})
+    assert normalize(record, sort=["$.tags"]).result == {"tags": ["a", "b"]}
+
+
+def test_normalize_sorts_after_scrubbing():
+    """Order lists by their scrubbed content, not by their volatile values.
+
+    What:     Two runs whose UUIDs sort in opposite orders still end up equal.
+    Why:      This proves the order of steps. If sorting ran first, each run would be
+              ordered by its random UUIDs and the lists would differ.
+    Expected: Both results become ["<UUID> note-a", "<UUID> note-b"].
+    """
+    run1 = make_record(
+        result={
+            "n": [
+                "11111111-1111-4111-8111-111111111111 note-b",
+                "99999999-9999-4999-8999-999999999999 note-a",
+            ]
+        }
+    )
+    run2 = make_record(
+        result={
+            "n": [
+                "99999999-9999-4999-8999-999999999999 note-b",
+                "11111111-1111-4111-8111-111111111111 note-a",
+            ]
+        }
+    )
+    expected = {"n": ["<UUID> note-a", "<UUID> note-b"]}
+    assert normalize(run1, sort=["$.n"]).result == expected
+    assert normalize(run2, sort=["$.n"]).result == expected
+
+
+def test_normalize_applies_all_three_steps_together():
+    """Combine ignore, scrub and sort in one call.
+
+    What:     A result needing all three cleanups comes out fully clean.
+    Why:      Checks the steps work together and do not interfere with one another.
+    Expected: request_id removed, the timestamp scrubbed, and the tags sorted.
+    """
+    record = make_record(
+        result={"request_id": "r9", "at": "2026-10-25T14:30:00Z", "tags": ["b", "a"]}
+    )
+    out = normalize(record, ignore=["$.request_id"], sort=["$.tags"])
+    assert out.result == {"at": "<TIMESTAMP>", "tags": ["a", "b"]}
+
+
+# --- normalize: options -----------------------------------------------------
+
+
+def test_normalize_with_empty_scrubbers_turns_scrubbing_off():
+    """Treat scrubbers=[] as "do not scrub".
+
+    What:     An empty list disables scrubbing, which is different from None.
+    Why:      Users must be able to opt out of the defaults.
+    Expected: The UUID stays in the result.
+    """
+    uuid = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    assert normalize(make_record(result=text_result(uuid)), scrubbers=[]).text == uuid
+
+
+def test_normalize_custom_scrubbers_replace_the_defaults():
+    """Use the given scrubbers instead of the defaults, not as well as them.
+
+    What:     With a digits-only scrubber, UUIDs are not replaced.
+    Why:      Predictable behavior: you get exactly the scrubbers you passed.
+    Expected: Digits become <N> and the UUID's letters remain.
+    """
+    custom = [(re.compile(r"\d+"), "<N>")]
+    record = make_record(result=text_result("order 123 f81d4fae-7dec"))
+    assert normalize(record, scrubbers=custom).text == "order <N> f<N>d<N>fae-<N>dec"
+
+
+# --- normalize: what stays the same -----------------------------------------
+
+
+def test_normalize_leaves_the_other_fields_alone():
+    """Change only the result.
+
+    What:     tool, arguments, is_error and latency_ms are copied as they are.
+    Why:      Latency is real measured data, and arguments are what was sent. Only
+              the result is compared.
+    Expected: Those four fields are equal on the input and the output.
+    """
+    record = make_record(
+        tool="t",
+        arguments={"id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"},
+        is_error=True,
+        latency_ms=99.5,
+        result="2026-10-25T14:30:00Z",
+    )
+    out = normalize(record)
+    assert (out.tool, out.arguments, out.is_error, out.latency_ms) == (
+        record.tool,
+        record.arguments,
+        record.is_error,
+        record.latency_ms,
+    )
+    assert out.result == "<TIMESTAMP>"
+
+
+def test_normalize_handles_results_that_are_not_lists_or_dicts():
+    """Accept strings, None and numbers as the result.
+
+    What:     A string is scrubbed, and None and a number come back unchanged.
+    Why:      result accepts any type, so normalize must not assume a shape.
+    Expected: "2026-10-25T14:30:00Z" -> "<TIMESTAMP>", None -> None, 42 -> 42
+    """
+    assert normalize(make_record(result="2026-10-25T14:30:00Z")).result == "<TIMESTAMP>"
+    assert normalize(make_record(result=None)).result is None
+    assert normalize(make_record(result=42)).result == 42
+
+
+def test_normalize_with_nothing_to_do_returns_an_equal_record():
+    """Treat a clean record as a no-op.
+
+    What:     A record with nothing to scrub, ignore or sort comes back equal.
+    Why:      Normalizing must not change data that needs no changes.
+    Expected: normalize(record) == record
+    """
+    record = make_record(result=text_result("hello"))
+    assert normalize(record) == record
+
+
+# --- normalize: safety ------------------------------------------------------
+
+
+def test_normalize_does_not_modify_the_input_record():
+    """Leave the original record untouched.
+
+    What:     After normalizing, the input's result still equals a deep copy taken
+              before the call.
+    Why:      Records are shared. Frozen only protects the fields, so the nested
+              result could be changed by mistake.
+    Expected: record.result == snapshot
+    """
+    record = make_record(
+        result={"request_id": "r1", "tags": ["b", "a"], "at": "2026-10-25T14:30:00Z"}
+    )
+    snapshot = copy.deepcopy(record.result)
+    normalize(record, ignore=["$.request_id"], sort=["$.tags"])
+    assert record.result == snapshot
+
+
+def test_normalize_output_does_not_share_containers_with_the_input():
+    """Return a result that is independent of the input's.
+
+    What:     The nested dicts and lists in the output are new objects.
+    Why:      Otherwise someone editing the output could silently change the original.
+    Expected: out.result["a"] is not record.result["a"]
+    """
+    record = make_record(result={"a": {"b": [1, 2]}})
+    out = normalize(record)
+    assert out.result is not record.result
+    assert out.result["a"] is not record.result["a"]
+    assert out.result["a"]["b"] is not record.result["a"]["b"]
+
+
+def test_normalize_is_idempotent():
+    """Normalizing twice gives the same result as normalizing once.
+
+    What:     A normalized record is stable.
+    Why:      Placeholders must not be changed again, and a sorted list stays sorted.
+    Expected: normalize(normalize(r)) == normalize(r)
+    """
+    record = make_record(
+        result={"at": "2026-10-25T14:30:00Z", "tags": ["b", "a"], "request_id": "r"}
+    )
+    kwargs = {"ignore": ["$.request_id"], "sort": ["$.tags"]}
+    once = normalize(record, **kwargs)
+    assert normalize(once, **kwargs) == once
+
+
+def test_normalize_raises_for_invalid_paths():
+    """Fail loudly on malformed paths.
+
+    What:     A bad ignore or sort path raises ValueError.
+    Why:      A typo must never silently leave a volatile field in place.
+    Expected: ValueError for ignore=["items"] and sort=["$.a[*]"].
+    """
+    record = make_record(result={})
+    with pytest.raises(ValueError):
+        normalize(record, ignore=["items"])
+    with pytest.raises(ValueError):
+        normalize(record, sort=["$.a[*]"])
+
+
+# --- normalize: the real purpose --------------------------------------------
+
+
+def test_normalize_makes_two_runs_of_the_same_call_comparable():
+    """Make two runs equal when they differ only in volatile content.
+
+    What:     Different IDs, timestamps, request IDs, order and latency all vanish
+              from the comparison of the results.
+    Why:      This is the purpose of the module: no false failures in snapshots,
+              same_output checks and replay.
+    Expected: The records differ, but normalize(a).result == normalize(b).result.
+    """
+    a = make_record(
+        latency_ms=10.0,
+        result={
+            "request_id": "x7Qp2",
+            "created": "2026-10-25T14:30:00Z",
+            "notes": [
+                {"id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "t": "alpha"},
+                {"id": "0e3c5d7a-1111-4222-8333-944455556666", "t": "beta"},
+            ],
+        },
+    )
+    b = make_record(
+        latency_ms=57.3,
+        result={
+            "request_id": "k91Zd",
+            "created": "2026-10-26T09:00:01Z",
+            "notes": [
+                {"id": "7a1b2c3d-4444-4555-8666-777788889999", "t": "beta"},
+                {"id": "00112233-aaaa-4bbb-8ccc-ddddeeeeffff", "t": "alpha"},
+            ],
+        },
+    )
+    kwargs = {"ignore": ["$.request_id"], "sort": ["$.notes"]}
+    assert a != b
+    assert normalize(a, **kwargs).result == normalize(b, **kwargs).result
