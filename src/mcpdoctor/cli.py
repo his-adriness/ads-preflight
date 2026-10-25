@@ -52,7 +52,7 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """A checkup for MCP servers: inspect, test, lint and benchmark."""
+    """A checkup for MCP servers: inspect, test and lint."""
 
 
 @app.command()

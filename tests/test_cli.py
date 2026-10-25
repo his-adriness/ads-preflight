@@ -2,6 +2,7 @@
 
 import pytest
 import typer
+from typer.main import get_command
 from typer.testing import CliRunner
 
 import mcpdoctor
@@ -51,19 +52,29 @@ def test_version_flag_prints_name_and_version():
 # --- Help -------------------------------------------------------------------
 
 
-def test_help_lists_exactly_the_three_v01_commands():
-    """List only the commands that are planned for v0.1.
+def test_exactly_the_three_v01_commands_are_registered():
+    """Register only the commands that are planned for v0.1.
 
-    What:     --help shows inspect, run and lint, and not snapshot or bench.
-    Why:      Help should not advertise commands that are far from existing.
-    Expected: The three names appear. "snapshot" and "bench" do not.
+    What:     The app has inspect, run and lint, and nothing else.
+    Why:      Help should not advertise commands that are far from existing. Checking
+              the registered names, not the help text, avoids matching words in
+              descriptions.
+    Expected: The registered command names are exactly inspect, lint and run.
+    """
+    assert sorted(get_command(app).commands) == ["inspect", "lint", "run"]
+
+
+def test_help_lists_the_three_commands():
+    """Show every command in --help.
+
+    What:     --help exits 0 and mentions inspect, run and lint.
+    Why:      Users find commands through the help text.
+    Expected: exit code 0 and the three names in the output.
     """
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for name in ("inspect", "run", "lint"):
         assert name in result.output
-    for name in ("snapshot", "bench"):
-        assert name not in result.output
 
 
 def test_no_arguments_shows_the_help():

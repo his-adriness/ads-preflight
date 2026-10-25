@@ -1,8 +1,8 @@
 # mcp-doctor
 
-> A checkup for MCP servers: inspect, test, lint and benchmark.
+> A checkup for MCP servers: inspect, test and lint.
 
-**Status:** early development. The data model and the normalization toolkit are built and tested. The command-line tool and the MCP client are not built yet, so there is nothing to run from the terminal today.
+**Status:** early development. The data model, the normalization toolkit and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet.
 
 ## Why
 
@@ -40,7 +40,19 @@ a = CallRecord(
         ],
     },
 )
-# b is the same call on another run: different IDs, timestamps and list order.
+
+# The same call on another run: different IDs, timestamps and list order.
+b = CallRecord(
+    tool="list_notes", arguments={}, latency_ms=15.0,
+    result={
+        "request_id": "k9Zt4",
+        "created": "2026-10-25T14:31:07Z",
+        "notes": [
+            {"id": "a1b2c3d4-aaaa-4bbb-8ccc-ddddeeeeffff", "title": "beta"},
+            {"id": "9c8b7a65-4321-4fed-9cba-0987654321ab", "title": "alpha"},
+        ],
+    },
+)
 
 options = {"ignore": ["$.request_id"], "sort": ["$.notes"]}
 assert normalize(a, **options).result == normalize(b, **options).result
@@ -55,11 +67,22 @@ After normalizing, the result looks like this:
 
 Path syntax is a small subset of JSONPath: `$`, `.key`, `[*]` (every list item) and `[0]` (one item). A path must end with a key.
 
+### Command line
+
+The `mcp-doctor` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
+
+```bash
+mcp-doctor --version
+mcp-doctor inspect -- python server.py
+mcp-doctor lint -- python server.py
+mcp-doctor run tests.yaml -- python server.py
+```
+
 ## Planned
 
-- `inspect`: connect to a server and list its tools, resources and prompts
-- `run`: execute YAML test files against a server
-- `lint`: audit a server automatically (schemas, descriptions, naming, error handling, timeouts, safety hints)
+- `inspect`: connect to a server and list its tools, resources and prompts (command exists, logic does not)
+- `run`: execute YAML test files against a server (command exists, logic does not)
+- `lint`: audit a server automatically: schemas, descriptions, naming, error handling, timeouts, safety hints (command exists, logic does not)
 - `snapshot`: save outputs and tool schemas, and classify drift
 - `bench`: latency and throughput per tool
 - Reports: terminal, JSON and JUnit XML, with non-zero exit codes for CI
@@ -103,7 +126,7 @@ mcp-doctor/
 ├─ src/mcpdoctor/
 │  ├─ models.py       # CallRecord
 │  ├─ normalize.py    # scrub, remove_paths, sort_lists, normalize
-│  ├─ cli.py          # commands (not built yet)
+│  ├─ cli.py          # inspect, run and lint commands (stubs for now)
 │  ├─ client.py       # MCP SDK client and transports (not built yet)
 │  ├─ runner.py       # test execution (not built yet)
 │  ├─ assertions.py   # expectation types (not built yet)
