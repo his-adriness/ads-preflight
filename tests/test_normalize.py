@@ -9,7 +9,9 @@ Each test docstring has three parts:
 import copy
 import re
 
-from mcpdoctor.normalize import scrub
+import pytest
+
+from mcpdoctor.normalize import parse_path, scrub
 
 DIGITS = [(re.compile(r"\d+"), "<N>")]
 
@@ -227,3 +229,140 @@ def test_scrub_handles_deep_nesting_and_large_lists():
 
     big = [f"item{i}" for i in range(10_000)]
     assert scrub(big, DIGITS)[-1] == "item<N>"
+
+
+# --- parse_path: valid paths ------------------------------------------------
+
+
+def test_parse_path_single_key():
+    """Parse the simplest path.
+
+    What:     A path with one key becomes one "key" step.
+    Why:      The baseline case. If this fails, every other path fails too.
+    Expected: parse_path("$.request_id") == [("key", "request_id")]
+    """
+    assert parse_path("$.request_id") == [("key", "request_id")]
+
+
+def test_parse_path_nested_keys():
+    """Parse keys separated by dots.
+
+    What:     Each key becomes its own step, in order.
+    Why:      Guards against steps being merged, dropped or reordered.
+    Expected: parse_path("$.a.b.c") == [("key", "a"), ("key", "b"), ("key", "c")]
+    """
+    assert parse_path("$.a.b.c") == [("key", "a"), ("key", "b"), ("key", "c")]
+
+
+def test_parse_path_wildcard_over_list_items():
+    """Parse [*] as "every item of a list".
+
+    What:     [*] becomes an "all" step between two keys.
+    Why:      This is the form used for lists of records, like
+              $.items[*].updated_at, so it is the most important one.
+    Expected: [("key", "items"), ("all", None), ("key", "updated_at")]
+    """
+    assert parse_path("$.items[*].updated_at") == [
+        ("key", "items"),
+        ("all", None),
+        ("key", "updated_at"),
+    ]
+
+
+def test_parse_path_list_index():
+    """Parse [0] as "the item at position 0".
+
+    What:     [n] becomes an "index" step holding the number as an int.
+    Why:      Guards against keeping the index as a string, which would never
+              match a list position.
+    Expected: [("key", "items"), ("index", 0), ("key", "id")]
+    """
+    assert parse_path("$.items[0].id") == [("key", "items"), ("index", 0), ("key", "id")]
+
+
+def test_parse_path_multi_digit_index():
+    """Parse indexes with more than one digit.
+
+    What:     [12] is read as the number 12, not as 1 and 2.
+    Why:      Guards against a pattern that only matches a single digit.
+    Expected: parse_path("$.a[12].b") == [("key", "a"), ("index", 12), ("key", "b")]
+    """
+    assert parse_path("$.a[12].b") == [("key", "a"), ("index", 12), ("key", "b")]
+
+
+def test_parse_path_wildcard_directly_on_the_root():
+    """Parse a path that starts by walking a top-level list.
+
+    What:     [*] may follow $ directly, for results that are lists.
+    Why:      MCP results are lists of content blocks, so paths often start here.
+    Expected: parse_path("$[*].x") == [("all", None), ("key", "x")]
+    """
+    assert parse_path("$[*].x") == [("all", None), ("key", "x")]
+
+
+def test_parse_path_accepts_hyphens_underscores_and_digits_in_keys():
+    """Allow common characters in key names.
+
+    What:     Keys such as my-key_2 are read whole.
+    Why:      Real field names are not always plain letters.
+    Expected: parse_path("$.my-key_2.x") == [("key", "my-key_2"), ("key", "x")]
+    """
+    assert parse_path("$.my-key_2.x") == [("key", "my-key_2"), ("key", "x")]
+
+
+# --- parse_path: invalid paths ----------------------------------------------
+
+
+def test_parse_path_must_start_with_a_dollar_sign():
+    """Reject paths that do not start at the root.
+
+    What:     "items" and "" are errors, not guesses.
+    Why:      A missing $ is almost always a typo. Failing loudly beats silently
+              ignoring a path and leaving a volatile field in place.
+    Expected: ValueError mentioning that the path must start with '$'.
+    """
+    with pytest.raises(ValueError, match="must start with"):
+        parse_path("items")
+    with pytest.raises(ValueError, match="must start with"):
+        parse_path("")
+
+
+@pytest.mark.parametrize("path", ["$", "$.a[*]", "$.a[0]"])
+def test_parse_path_must_end_with_a_key(path):
+    """Reject paths whose last step is not a key.
+
+    What:     "$", "$.a[*]" and "$.a[0]" are errors.
+    Why:      Only dict keys can be removed. Removing list items would shift the
+              positions of the others and give surprising results.
+    Expected: ValueError mentioning that the path must end with a key.
+    """
+    with pytest.raises(ValueError, match="must end with a key"):
+        parse_path(path)
+
+
+@pytest.mark.parametrize("path", ["$.a..b", "$.a[x]", "$.a[", "$.a[*", "$.", "$.a[-1]"])
+def test_parse_path_rejects_malformed_paths(path):
+    """Reject paths with broken syntax.
+
+    What:     Double dots, non-numeric or negative indexes, unclosed brackets and a
+              trailing dot are errors.
+    Why:      A half-understood path must never be accepted, because it would
+              silently ignore the field the user meant to remove.
+    Expected: ValueError mentioning that the path is invalid.
+    """
+    with pytest.raises(ValueError, match="invalid path"):
+        parse_path(path)
+
+
+def test_parse_path_error_points_at_the_problem():
+    """Include the path and the position in the error message.
+
+    What:     The message shows the bad path and where parsing stopped.
+    Why:      A user with a long path list needs to know which one is wrong, and
+              where.
+    Expected: The ValueError message contains '$.a..b' and 'position 3'.
+    """
+    with pytest.raises(ValueError) as error:
+        parse_path("$.a..b")
+    assert "$.a..b" in str(error.value)
+    assert "position 3" in str(error.value)
