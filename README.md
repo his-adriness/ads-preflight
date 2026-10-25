@@ -2,53 +2,113 @@
 
 > A checkup for MCP servers: inspect, test, lint and benchmark.
 
-**Status:** early scaffold. Nothing is implemented yet.
+**Status:** early development. The data model and the normalization toolkit are built and tested. The command-line tool and the MCP client are not built yet, so there is nothing to run from the terminal today.
 
 ## Why
 
-MCP server authors usually test by chatting with an AI client and hoping it works. That misses broken schemas, vague tool descriptions, crashes on bad input, and regressions after changes. `mcp-doctor` makes those checks repeatable and CI-friendly.
+MCP server authors usually test by chatting with an AI client and hoping it works. That misses broken schemas, vague tool descriptions, crashes on bad input, and regressions after changes. `mcp-doctor` aims to make those checks repeatable and CI-friendly.
 
-## Planned features
+## What works today
+
+### `CallRecord`
+
+An immutable record of one tool call: the tool name, the arguments, the result, an error flag and the latency in milliseconds. Every feature reads from this one shape. It serializes to JSON (one record per line in JSONL), and `.text` returns the text content of a result.
+
+### `normalize`
+
+Two runs of the same tool call rarely return identical output: IDs and timestamps change, and unordered collections come back in a different order. The `normalize` module removes those differences so results can be compared fairly.
+
+| Function | What it does |
+|---|---|
+| `scrub(value, scrubbers)` | Replaces volatile strings (UUIDs, timestamps by default) with placeholders, at any depth |
+| `remove_paths(value, paths)` | Removes fields by path, such as `$.request_id` or `$.items[*].updated_at` |
+| `sort_lists(value, paths)` | Puts the lists at the given paths in a stable order |
+| `normalize(record, ...)` | Applies all three to a `CallRecord`'s result, in that order, and returns a new record |
+
+```python
+from mcpdoctor.models import CallRecord
+from mcpdoctor.normalize import normalize
+
+a = CallRecord(
+    tool="list_notes", arguments={}, latency_ms=12.0,
+    result={
+        "request_id": "x7Qp2",
+        "created": "2026-10-25T14:30:00Z",
+        "notes": [
+            {"id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "title": "alpha"},
+            {"id": "0e3c5d7a-1111-4222-8333-944455556666", "title": "beta"},
+        ],
+    },
+)
+# b is the same call on another run: different IDs, timestamps and list order.
+
+options = {"ignore": ["$.request_id"], "sort": ["$.notes"]}
+assert normalize(a, **options).result == normalize(b, **options).result
+```
+
+After normalizing, the result looks like this:
+
+```python
+{"created": "<TIMESTAMP>", "notes": [{"id": "<UUID>", "title": "alpha"},
+                                      {"id": "<UUID>", "title": "beta"}]}
+```
+
+Path syntax is a small subset of JSONPath: `$`, `.key`, `[*]` (every list item) and `[0]` (one item). A path must end with a key.
+
+## Planned
 
 - `inspect`: connect to a server and list its tools, resources and prompts
 - `run`: execute YAML test files against a server
 - `lint`: audit a server automatically (schemas, descriptions, naming, error handling, timeouts, safety hints)
-- `snapshot`: snapshot outputs and tool schemas, and classify drift
+- `snapshot`: save outputs and tool schemas, and classify drift
 - `bench`: latency and throughput per tool
 - Reports: terminal, JSON and JUnit XML, with non-zero exit codes for CI
+- A reusable GitHub Action
 
-## Install (development)
+## Development
+
+You need Python 3.10 or newer.
 
 ```bash
 git clone https://github.com/his-adriness/mcp-doctor.git
 cd mcp-doctor
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS / Linux
-pip install -e ".[dev]"
 ```
 
-## Usage
+Activate the environment:
 
 ```bash
-mcp-doctor inspect --command "python server.py"
-mcp-doctor run tests/example.yaml
-mcp-doctor lint --command "python server.py"
+# Windows (Command Prompt)
+.venv\Scripts\activate.bat
+# Windows (Git Bash)
+source .venv/Scripts/activate
+# macOS / Linux
+source .venv/bin/activate
 ```
 
-*(Planned. Not implemented yet.)*
+Then install and check:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest
+python -m ruff check .
+```
+
+Run both checks before pushing. CI runs the same two commands.
 
 ## Project layout
 
 ```
 mcp-doctor/
 ├─ src/mcpdoctor/
-│  ├─ cli.py          # commands
-│  ├─ client.py       # MCP SDK client + transports
-│  ├─ runner.py       # test execution
-│  ├─ assertions.py   # expectation types
-│  ├─ lint_rules.py   # lint rules
-│  └─ reporters/      # terminal, json, junit
+│  ├─ models.py       # CallRecord
+│  ├─ normalize.py    # scrub, remove_paths, sort_lists, normalize
+│  ├─ cli.py          # commands (not built yet)
+│  ├─ client.py       # MCP SDK client and transports (not built yet)
+│  ├─ runner.py       # test execution (not built yet)
+│  ├─ assertions.py   # expectation types (not built yet)
+│  ├─ lint_rules.py   # lint rules (not built yet)
+│  └─ reporters/      # terminal, json, junit (not built yet)
 ├─ examples/
 │  ├─ servers/        # a good server and a deliberately broken one
 │  └─ tests/          # sample test files
@@ -58,11 +118,17 @@ mcp-doctor/
 
 ## Design decisions
 
-*(To be written.)*
+- **Records are immutable.** A `CallRecord` cannot be changed after it is created. Cleaning a record builds a new one, validated with `model_validate` (`model_copy(update=...)` skips validation).
+- **Normalization is opt-in by path.** Some lists are order-meaningful, such as MCP content blocks. Only the lists you name are sorted, and only the fields you name are removed.
+- **Sorting runs last.** Lists are ordered by their scrubbed content. Sorting first would order them by values that change on every run.
+- **Typos fail loudly.** A malformed path raises an error even when it would match nothing. A well-formed path that matches nothing is skipped, because a volatile field may be absent from some results.
+- **Only `result` is normalized.** Latency is real measured data, so compare `.result`, not whole records.
 
-## Limitations and next steps
+## Known limitations
 
-*(To be written.)*
+- Frozen records protect their fields, not the dicts and lists inside them.
+- `ignore` and `sort` paths cannot look inside JSON that a server wrote as text.
+- Sorting is stable and deterministic, not natural: the text `"10"` sorts before `"2"`.
 
 ## License
 

@@ -1,9 +1,4 @@
-"""Tests for CallRecord: basics, a gauntlet of edge cases, and the .text helper.
-
-Tests marked xfail(strict=True) describe behavior we WANT but don't have yet.
-They are expected to fail today; when you fix the model, pytest will flag them
-as XPASS so you remember to remove the marker.
-"""
+"""Tests for CallRecord: basics, a gauntlet of edge cases, and the .text helper."""
 
 import copy
 import json
@@ -333,25 +328,22 @@ def test_latency_boundaries_are_accepted():
         assert make_record(latency_ms=value).latency_ms == float(value)
 
 
-@pytest.mark.xfail(strict=True, reason="No validation yet: negative latency is accepted")
 def test_negative_latency_is_rejected():
-    """DESIRED: a duration can't be negative.
+    """A duration can't be negative.
 
-    Passes if: latency_ms=-1 raises a ValidationError.
-    (Fix idea: latency_ms: float = Field(ge=0).)
+    Passes if: latency_ms=-1 and latency_ms=-0.001 raise a ValidationError.
     """
-    with pytest.raises(ValidationError):
-        make_record(latency_ms=-1)
+    for bad in (-1, -0.001):
+        with pytest.raises(ValidationError):
+            make_record(latency_ms=bad)
 
 
-@pytest.mark.xfail(strict=True, reason="No validation yet: NaN/inf latency is accepted")
 def test_nan_and_infinite_latency_are_rejected():
-    """DESIRED: NaN and infinity make no sense as a latency (and break JSON).
+    """NaN and infinity make no sense as a latency (and break JSON).
 
-    Passes if: latency_ms=nan and latency_ms=inf both raise a ValidationError.
-    (Fix idea: Field(ge=0, allow_inf_nan=False).)
+    Passes if: latency_ms=nan, inf and -inf all raise a ValidationError.
     """
-    for bad in (math.nan, math.inf):
+    for bad in (math.nan, math.inf, -math.inf):
         with pytest.raises(ValidationError):
             make_record(latency_ms=bad)
 
@@ -404,12 +396,12 @@ def test_text_is_empty_for_unsupported_result_type():
 
 
 def test_text_ignores_blocks_without_text_key():
-    """A text block with no 'text' key counts as empty and adds a blank line.
+    """A text block with no 'text' key is skipped, like any malformed block.
 
-    Passes if: .text == "\\nkept" for a blank text block followed by "kept".
+    Passes if: .text == "kept" for a text block with no text followed by "kept".
     """
     result = [{"type": "text"}, {"type": "text", "text": "kept"}]
-    assert make_record(result=result).text == "\nkept"
+    assert make_record(result=result).text == "kept"
 
 
 def test_text_ignores_non_dict_items():
@@ -421,20 +413,21 @@ def test_text_ignores_non_dict_items():
     assert make_record(result=result).text == "kept"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: text join crashes on non-string 'text' values")
 def test_text_survives_non_string_text_values():
-    """DESIRED: a malformed block must not crash .text.
+    """A malformed block must not crash .text.
 
-    Passes if: blocks whose 'text' is None or an int don't raise, and the
-    valid block's text is still returned.
-    (Fix idea: only keep values that are str, or wrap them with str().)
+    Passes if: blocks whose 'text' is None, a number, a bool, a list or a dict are
+    skipped, and .text == "kept" (only the valid block's text is returned).
     """
     result = [
         {"type": "text", "text": None},
         {"type": "text", "text": 123},
+        {"type": "text", "text": True},
+        {"type": "text", "text": ["x"]},
+        {"type": "text", "text": {"k": 1}},
         {"type": "text", "text": "kept"},
     ]
-    assert "kept" in make_record(result=result).text
+    assert make_record(result=result).text == "kept"
 
 
 def test_text_is_repeatable_and_does_not_mutate_result():
