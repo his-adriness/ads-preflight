@@ -1,7 +1,10 @@
 """Normalize CallRecords so volatile values don't break comparisons."""
 
+import json
 import re
 from typing import Any
+
+Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
 
 Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
 
@@ -98,4 +101,45 @@ def remove_paths(value: Any, paths: list[str]) -> Any:
     """
     for path in paths:
         value = _remove(value, parse_path(path))
+    return value
+
+# --- Sorting lists ----------------------------------------------------------
+
+
+def _sort_key(item: Any) -> str:
+    """Canonical text of an item, so any mix of JSON values can be ordered."""
+    try:
+        return json.dumps(item, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        return repr(item)
+
+
+def _sort_at(value: Any, tokens: list[_Token]) -> Any:
+    kind, arg = tokens[0]
+    rest = tokens[1:]
+    if kind == "key":
+        if not isinstance(value, dict) or arg not in value:
+            return value
+        if not rest:
+            if not isinstance(value[arg], list):
+                return value
+            return {**value, arg: sorted(value[arg], key=_sort_key)}
+        return {**value, arg: _sort_at(value[arg], rest)}
+    if not isinstance(value, list):
+        return value
+    if kind == "all":
+        return [_sort_at(item, rest) for item in value]
+    # kind == "index"
+    return [_sort_at(item, rest) if i == arg else item for i, item in enumerate(value)]
+
+
+def sort_lists(value: Any, paths: list[str]) -> Any:
+    """Return a copy of value with the lists at the given paths put in stable order.
+
+    Each path must end with the key that holds the list, like '$.items'.
+    Paths that match nothing, or match something that is not a list, are ignored.
+    The input is never modified.
+    """
+    for path in paths:
+        value = _sort_at(value, parse_path(path))
     return value
