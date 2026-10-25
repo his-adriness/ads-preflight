@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from mcpdoctor.normalize import parse_path, scrub
+from mcpdoctor.normalize import parse_path, remove_paths, scrub
 
 DIGITS = [(re.compile(r"\d+"), "<N>")]
 
@@ -366,3 +366,246 @@ def test_parse_path_error_points_at_the_problem():
         parse_path("$.a..b")
     assert "$.a..b" in str(error.value)
     assert "position 3" in str(error.value)
+
+
+# --- remove_paths: removing keys --------------------------------------------
+
+
+def test_remove_paths_removes_a_top_level_key():
+    """Remove one key from the top level.
+
+    What:     The key named by the path disappears. Other keys stay.
+    Why:      The baseline case. If this fails, nothing else works.
+    Expected: remove_paths({"request_id": "r1", "n": 1}, ["$.request_id"]) == {"n": 1}
+    """
+    assert remove_paths({"request_id": "r1", "n": 1}, ["$.request_id"]) == {"n": 1}
+
+
+def test_remove_paths_removes_a_nested_key():
+    """Remove a key several levels down.
+
+    What:     Only the targeted key is removed. Its siblings stay.
+    Why:      Guards against removing the whole parent, or the wrong level.
+    Expected: {"a": {"b": {"c": 1, "d": 2}}} with "$.a.b.c" becomes
+              {"a": {"b": {"d": 2}}}
+    """
+    data = {"a": {"b": {"c": 1, "d": 2}}}
+    assert remove_paths(data, ["$.a.b.c"]) == {"a": {"b": {"d": 2}}}
+
+
+def test_remove_paths_removes_a_key_from_every_list_item():
+    """Apply [*] to every item of a list.
+
+    What:     The key is removed from each dict in the list.
+    Why:      This is the main use: volatile fields such as updated_at repeat in
+              every record of a list.
+    Expected: "$.items[*].updated_at" leaves each item with only its "id".
+    """
+    data = {"items": [{"id": 1, "updated_at": "t1"}, {"id": 2, "updated_at": "t2"}]}
+    assert remove_paths(data, ["$.items[*].updated_at"]) == {"items": [{"id": 1}, {"id": 2}]}
+
+
+def test_remove_paths_removes_a_key_from_one_list_item_only():
+    """Apply [n] to a single list item.
+
+    What:     The key is removed from the item at that position only.
+    Why:      Guards against an index being treated like a wildcard.
+    Expected: "$.pair[1].a" removes "a" from the second item and keeps the first.
+    """
+    data = {"pair": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]}
+    assert remove_paths(data, ["$.pair[1].a"]) == {"pair": [{"a": 1, "b": 2}, {"b": 4}]}
+
+
+def test_remove_paths_works_when_the_root_is_a_list():
+    """Start from a top-level list.
+
+    What:     "$[*].x" removes "x" from every item of a list that is the value itself.
+    Why:      MCP results are often lists of content blocks, so paths start here.
+    Expected: [{"x": 1, "y": 2}, {"x": 3}] becomes [{"y": 2}, {}]
+    """
+    assert remove_paths([{"x": 1, "y": 2}, {"x": 3}], ["$[*].x"]) == [{"y": 2}, {}]
+
+
+def test_remove_paths_handles_several_paths_in_one_call():
+    """Apply every path in the list.
+
+    What:     Each listed path is removed, in one call.
+    Why:      A test file lists several volatile fields at once.
+    Expected: All three listed fields are gone and the rest remains.
+    """
+    data = {
+        "request_id": "r1",
+        "etag": "e1",
+        "items": [{"id": 1, "updated_at": "t1", "meta": {"etag": "x", "keep": 1}}],
+    }
+    paths = ["$.request_id", "$.etag", "$.items[*].updated_at", "$.items[0].meta.etag"]
+    assert remove_paths(data, paths) == {"items": [{"id": 1, "meta": {"keep": 1}}]}
+
+
+def test_remove_paths_only_removes_the_exact_location():
+    """Leave same-named keys elsewhere alone.
+
+    What:     "$.a.id" removes the id inside "a" and not the id inside "b".
+    Why:      The reason paths exist: a field may be volatile in one place and
+              meaningful in another.
+    Expected: {"a": {"id": 1}, "b": {"id": 2}} becomes {"a": {}, "b": {"id": 2}}
+    """
+    data = {"a": {"id": 1}, "b": {"id": 2}}
+    assert remove_paths(data, ["$.a.id"]) == {"a": {}, "b": {"id": 2}}
+
+
+def test_remove_paths_removes_keys_with_falsy_values():
+    """Remove a key even when its value is None, 0, "" or False.
+
+    What:     The value does not decide whether the key is removed.
+    Why:      Guards against a check like `if value` instead of `if key in dict`.
+    Expected: All four keys are removed.
+    """
+    data = {"a": None, "b": 0, "c": "", "d": False, "keep": 1}
+    assert remove_paths(data, ["$.a", "$.b", "$.c", "$.d"]) == {"keep": 1}
+
+
+def test_remove_paths_preserves_the_order_of_remaining_keys():
+    """Keep the remaining keys in their original order.
+
+    What:     Removing a key does not reshuffle the others.
+    Why:      Snapshots and JSON diffs depend on stable ordering.
+    Expected: list(result) == ["z", "m"] after removing "a" from z, a, m.
+    """
+    assert list(remove_paths({"z": 1, "a": 2, "m": 3}, ["$.a"])) == ["z", "m"]
+
+
+# --- remove_paths: paths that match nothing ---------------------------------
+
+
+def test_remove_paths_ignores_a_missing_key():
+    """Skip paths whose key does not exist.
+
+    What:     A path that matches nothing changes nothing and raises nothing.
+    Why:      A volatile field may be absent from some results. That is not an error.
+    Expected: remove_paths({"a": 1}, ["$.nope", "$.a.b.c"]) == {"a": 1}
+    """
+    assert remove_paths({"a": 1}, ["$.nope", "$.a.b.c"]) == {"a": 1}
+
+
+def test_remove_paths_ignores_values_of_the_wrong_type():
+    """Skip paths that meet the wrong kind of value.
+
+    What:     A key looked up in a string or list, and [*] used on a dict or string,
+              are skipped.
+    Why:      Results vary in shape. A path written for one shape must not crash on
+              another.
+    Expected: The data comes back unchanged for each case.
+    """
+    assert remove_paths("text", ["$.a"]) == "text"
+    assert remove_paths([1, 2], ["$.a"]) == [1, 2]
+    assert remove_paths({"a": {"b": 1}}, ["$.a[*].b"]) == {"a": {"b": 1}}
+    assert remove_paths({"a": "text"}, ["$.a[*].b"]) == {"a": "text"}
+
+
+def test_remove_paths_ignores_an_index_past_the_end():
+    """Skip an index that does not exist.
+
+    What:     "$.items[9].id" on a two-item list changes nothing.
+    Why:      Lists vary in length between runs.
+    Expected: The data comes back equal to the input.
+    """
+    data = {"items": [{"id": 1}, {"id": 2}]}
+    assert remove_paths(data, ["$.items[9].id"]) == data
+
+
+def test_remove_paths_skips_list_items_that_lack_the_key():
+    """Handle lists where only some items have the field.
+
+    What:     Items without the key are left as they are, and others lose it.
+    Why:      Records in a list are not always uniform.
+    Expected: "$.items[*].meta.etag" removes etag where it exists and skips item 2.
+    """
+    data = {"items": [{"meta": {"etag": "x", "k": 1}}, {"id": 2}]}
+    assert remove_paths(data, ["$.items[*].meta.etag"]) == {
+        "items": [{"meta": {"k": 1}}, {"id": 2}]
+    }
+
+
+def test_remove_paths_with_no_paths_changes_nothing():
+    """Treat an empty path list as a no-op.
+
+    What:     With no paths, the data comes back equal.
+    Why:      "Nothing to ignore" is the normal default and must not alter data.
+    Expected: remove_paths(data, []) == data
+    """
+    data = {"a": [1, {"b": 2}]}
+    assert remove_paths(data, []) == data
+
+
+# --- remove_paths: safety ---------------------------------------------------
+
+
+def test_remove_paths_does_not_modify_its_input():
+    """Leave the original data untouched.
+
+    What:     After removal, the input still equals a copy taken before the call.
+    Why:      Records and snapshots depend on the original staying intact.
+    Expected: data == snapshot (a deep copy made before the call)
+    """
+    data = {"request_id": "r1", "items": [{"id": 1, "updated_at": "t1"}]}
+    snapshot = copy.deepcopy(data)
+    remove_paths(data, ["$.request_id", "$.items[*].updated_at"])
+    assert data == snapshot
+
+
+def test_remove_paths_returns_new_containers_along_the_path():
+    """Return new dicts and lists where something was removed.
+
+    What:     The result and the containers on the way to the removed key are not
+              the input objects.
+    Why:      Guards against editing in place and returning the same object.
+    Expected: out is not data, and out["items"] is not data["items"].
+    """
+    data = {"items": [{"id": 1, "updated_at": "t1"}]}
+    out = remove_paths(data, ["$.items[*].updated_at"])
+    assert out is not data
+    assert out["items"] is not data["items"]
+
+
+def test_remove_paths_is_safe_to_repeat():
+    """Allow the same path twice, or a later path that an earlier one made empty.
+
+    What:     Removing again is a no-op, not an error.
+    Why:      Path lists are written by hand and can overlap.
+    Expected: Applying "$.a" twice, or "$.a" then "$.a.b", gives {"keep": 1}.
+    """
+    data = {"a": {"b": 1}, "keep": 1}
+    assert remove_paths(data, ["$.a", "$.a"]) == {"keep": 1}
+    assert remove_paths(data, ["$.a", "$.a.b"]) == {"keep": 1}
+
+
+# --- remove_paths: invalid paths and the real purpose -----------------------
+
+
+def test_remove_paths_rejects_an_invalid_path_even_if_nothing_matches():
+    """Raise for malformed paths before looking at the data.
+
+    What:     A bad path raises ValueError, even on empty data.
+    Why:      A typo in a path must never be hidden by "nothing matched".
+    Expected: ValueError for "items" (no $) and "$.a[*]" (does not end with a key).
+    """
+    with pytest.raises(ValueError):
+        remove_paths({}, ["items"])
+    with pytest.raises(ValueError):
+        remove_paths({}, ["$.a[*]"])
+
+
+def test_remove_paths_makes_runs_that_differ_only_in_ignored_fields_equal():
+    """Compare results fairly.
+
+    What:     Two results that differ only in listed fields become identical.
+    Why:      This is the purpose of the feature: no false failures from fields that
+              change on every run.
+    Expected: The raw results differ, but the results after removal are equal.
+    """
+    first = {"request_id": "x7Qp2", "items": [{"id": 1, "updated_at": 1761400000}]}
+    second = {"request_id": "k91Zd", "items": [{"id": 1, "updated_at": 1761400873}]}
+    paths = ["$.request_id", "$.items[*].updated_at"]
+    assert first != second
+    assert remove_paths(first, paths) == remove_paths(second, paths)
