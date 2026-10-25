@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CallRecord(BaseModel):
@@ -19,7 +19,7 @@ class CallRecord(BaseModel):
     arguments: dict[str, Any] #Arguments sent to the tool, as a JSON-style dict.
     result: Any #The server's response, either a string or a list of content blocks.
     is_error: bool = False #True if the server reported the call as failed. Defaults to False.
-    latency_ms: float #Time the call took, in milliseconds.
+    latency_ms: float = Field(ge=0, allow_inf_nan=False) #Time the call took, in milliseconds.
 
     @property
     def text(self) -> str:
@@ -28,10 +28,11 @@ class CallRecord(BaseModel):
             return self.result
         if isinstance(self.result, list):
             parts = [
-                block.get("text", "")
+                block["text"]
                 for block in self.result
-                if isinstance(block, dict) and block.get("type") == "text"
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
             ]
             return "\n".join(parts)
-        """Return True if the call was successful."""
         return ""
