@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from mcpdoctor.normalize import parse_path, remove_paths, scrub
+from mcpdoctor.normalize import parse_path, remove_paths, scrub, sort_lists
 
 DIGITS = [(re.compile(r"\d+"), "<N>")]
 
@@ -609,3 +609,265 @@ def test_remove_paths_makes_runs_that_differ_only_in_ignored_fields_equal():
     paths = ["$.request_id", "$.items[*].updated_at"]
     assert first != second
     assert remove_paths(first, paths) == remove_paths(second, paths)
+
+
+# --- sort_lists: sorting ----------------------------------------------------
+
+
+def test_sort_lists_sorts_a_list_of_strings():
+    """Sort a list found under a key.
+
+    What:     The list at the path comes back in order.
+    Why:      The baseline case. If this fails, nothing else works.
+    Expected: sort_lists({"tags": ["b", "c", "a"]}, ["$.tags"]) == {"tags": ["a", "b", "c"]}
+    """
+    assert sort_lists({"tags": ["b", "c", "a"]}, ["$.tags"]) == {"tags": ["a", "b", "c"]}
+
+
+def test_sort_lists_gives_the_same_result_whatever_the_input_order():
+    """Make order irrelevant.
+
+    What:     Two lists with the same items in different orders sort to the same list.
+    Why:      This is the whole point: comparing two runs must not depend on the order
+              the server happened to return items in.
+    Expected: Every permutation of [10, 2, 33, 4] gives the same sorted list.
+    """
+    from itertools import permutations
+
+    results = [sort_lists({"n": list(p)}, ["$.n"]) for p in permutations([10, 2, 33, 4])]
+    assert all(result == results[0] for result in results)
+
+
+def test_sort_lists_sorts_a_list_of_dicts():
+    """Sort items that are dicts, which Python cannot compare directly.
+
+    What:     Dict items are ordered by their canonical JSON text.
+    Why:      Real results are lists of records. Sorting dicts directly would crash.
+    Expected: The same records in different orders sort to the same list.
+    """
+    a = {"items": [{"id": 2, "n": "b"}, {"id": 1, "n": "a"}]}
+    b = {"items": [{"id": 1, "n": "a"}, {"id": 2, "n": "b"}]}
+    assert sort_lists(a, ["$.items"]) == sort_lists(b, ["$.items"])
+
+
+def test_sort_lists_ignores_the_key_order_inside_dict_items():
+    """Treat {"a": 1, "b": 2} and {"b": 2, "a": 1} as the same item.
+
+    What:     The sort looks at content, not at how each dict was written.
+    Why:      Two servers can return identical records with keys in a different order.
+    Expected: The two lists sort to equal lists.
+    """
+    a = {"items": [{"b": 2, "a": 1}, {"a": 0, "b": 0}]}
+    b = {"items": [{"a": 0, "b": 0}, {"a": 1, "b": 2}]}
+    assert sort_lists(a, ["$.items"]) == sort_lists(b, ["$.items"])
+
+
+def test_sort_lists_handles_mixed_types_without_crashing():
+    """Sort a list holding numbers, strings, None and dicts together.
+
+    What:     Items of different types can be ordered.
+    Why:      Python raises TypeError when comparing, say, 1 with "a". A list from a
+              server could hold anything.
+    Expected: The call succeeds, keeps all 5 items, and is the same for any order.
+    """
+    items = [1, "a", None, {"k": 1}, [2]]
+    out = sort_lists({"x": items}, ["$.x"])["x"]
+    assert len(out) == 5
+    assert out == sort_lists({"x": list(reversed(items))}, ["$.x"])["x"]
+
+
+def test_sort_lists_keeps_duplicates_and_length():
+    """Never drop or merge items.
+
+    What:     Equal items stay, so the length is unchanged.
+    Why:      Sorting must not hide a bug where a server returns an item twice.
+    Expected: [2, 1, 2] becomes [1, 2, 2].
+    """
+    assert sort_lists({"n": [2, 1, 2]}, ["$.n"]) == {"n": [1, 2, 2]}
+
+
+def test_sort_lists_handles_an_empty_list():
+    """Accept an empty list.
+
+    What:     An empty list stays empty.
+    Why:      Empty values are a classic edge case.
+    Expected: sort_lists({"n": []}, ["$.n"]) == {"n": []}
+    """
+    assert sort_lists({"n": []}, ["$.n"]) == {"n": []}
+
+
+# --- sort_lists: choosing which lists ---------------------------------------
+
+
+def test_sort_lists_only_sorts_the_listed_paths():
+    """Leave other lists in their original order.
+
+    What:     A list that is not named stays as it was.
+    Why:      Some lists are order-meaningful (steps, content blocks). Sorting them
+              would hide real bugs.
+    Expected: "tags" is sorted and "steps" keeps its order.
+    """
+    data = {"tags": ["b", "a"], "steps": ["second", "first"]}
+    assert sort_lists(data, ["$.tags"]) == {"tags": ["a", "b"], "steps": ["second", "first"]}
+
+
+def test_sort_lists_sorts_lists_inside_every_item():
+    """Use [*] to sort a list inside each record.
+
+    What:     "$.items[*].tags" sorts the tags of every item.
+    Why:      Unordered lists often sit inside records.
+    Expected: Each item's tags come back sorted.
+    """
+    data = {"items": [{"tags": ["b", "a"]}, {"tags": ["z", "y"]}]}
+    assert sort_lists(data, ["$.items[*].tags"]) == {
+        "items": [{"tags": ["a", "b"]}, {"tags": ["y", "z"]}]
+    }
+
+
+def test_sort_lists_sorts_a_list_inside_one_item():
+    """Use [n] to sort a list inside a single item.
+
+    What:     Only the item at that position is touched.
+    Why:      Guards against an index being treated like a wildcard.
+    Expected: The first item's tags are sorted and the second item's are not.
+    """
+    data = {"items": [{"tags": ["b", "a"]}, {"tags": ["z", "y"]}]}
+    assert sort_lists(data, ["$.items[0].tags"]) == {
+        "items": [{"tags": ["a", "b"]}, {"tags": ["z", "y"]}]
+    }
+
+
+def test_sort_lists_handles_several_paths():
+    """Apply every path in the list.
+
+    What:     Each listed path is sorted in one call.
+    Why:      A test file names several unordered lists at once.
+    Expected: Both lists come back sorted.
+    """
+    data = {"a": [2, 1], "b": [4, 3]}
+    assert sort_lists(data, ["$.a", "$.b"]) == {"a": [1, 2], "b": [3, 4]}
+
+
+def test_sort_lists_keeps_the_order_of_keys():
+    """Leave the dict's key order alone.
+
+    What:     Sorting a list does not reshuffle the keys around it.
+    Why:      Snapshots and JSON diffs depend on stable key order.
+    Expected: list(result) == ["z", "tags", "a"]
+    """
+    out = sort_lists({"z": 1, "tags": ["b", "a"], "a": 2}, ["$.tags"])
+    assert list(out) == ["z", "tags", "a"]
+
+
+# --- sort_lists: paths that match nothing -----------------------------------
+
+
+def test_sort_lists_ignores_a_missing_key():
+    """Skip paths whose key does not exist.
+
+    What:     A path that matches nothing changes nothing and raises nothing.
+    Why:      A list may be absent from some results. That is not an error.
+    Expected: sort_lists({"a": [2, 1]}, ["$.nope", "$.a.b.c"]) == {"a": [2, 1]}
+    """
+    assert sort_lists({"a": [2, 1]}, ["$.nope", "$.a.b.c"]) == {"a": [2, 1]}
+
+
+def test_sort_lists_ignores_values_that_are_not_lists():
+    """Skip a path that points at something other than a list.
+
+    What:     Strings, numbers, dicts and None are returned as they are.
+    Why:      Results vary in shape. A path written for one shape must not crash on
+              another.
+    Expected: The data comes back unchanged for each case.
+    """
+    for value in ("text", 5, {"k": 1}, None):
+        assert sort_lists({"x": value}, ["$.x"]) == {"x": value}
+
+
+def test_sort_lists_with_no_paths_changes_nothing():
+    """Treat an empty path list as a no-op.
+
+    What:     With no paths, the data comes back equal.
+    Why:      "Nothing to sort" is the normal default and must not alter data.
+    Expected: sort_lists(data, []) == data
+    """
+    data = {"a": [2, 1]}
+    assert sort_lists(data, []) == data
+
+
+# --- sort_lists: safety and the real purpose --------------------------------
+
+
+def test_sort_lists_does_not_modify_its_input():
+    """Leave the original data untouched.
+
+    What:     After sorting, the input still equals a copy taken before the call.
+    Why:      Records and snapshots depend on the original staying intact.
+    Expected: data == snapshot (a deep copy made before the call)
+    """
+    data = {"tags": ["b", "a"], "items": [{"tags": ["d", "c"]}]}
+    snapshot = copy.deepcopy(data)
+    sort_lists(data, ["$.tags", "$.items[*].tags"])
+    assert data == snapshot
+
+
+def test_sort_lists_returns_a_new_list():
+    """Return a new list, not the original one.
+
+    What:     The sorted list is a different object from the input list.
+    Why:      Guards against sorting in place (list.sort) and returning the same object.
+    Expected: out["tags"] is not data["tags"]
+    """
+    data = {"tags": ["b", "a"]}
+    assert sort_lists(data, ["$.tags"])["tags"] is not data["tags"]
+
+
+def test_sort_lists_is_idempotent():
+    """Sorting twice gives the same result as sorting once.
+
+    What:     An already sorted list stays as it is.
+    Why:      A stable, repeatable order is what makes comparisons reliable.
+    Expected: sort_lists(sort_lists(x)) == sort_lists(x)
+    """
+    once = sort_lists({"n": [3, 1, 2]}, ["$.n"])
+    assert sort_lists(once, ["$.n"]) == once
+
+
+def test_sort_lists_survives_items_that_cannot_be_turned_into_json():
+    """Sort without crashing when an item is not JSON data.
+
+    What:     Objects, sets and dicts with mixed key types are still ordered.
+    Why:      Sorting is a comparison helper and should not be the thing that
+              crashes a run.
+    Expected: The call succeeds and keeps all items.
+    """
+    items = [object(), {1, 2}, {1: "a", "b": 2}]
+    out = sort_lists({"x": items}, ["$.x"])["x"]
+    assert len(out) == 3
+
+
+def test_sort_lists_rejects_an_invalid_path_even_if_nothing_matches():
+    """Raise for malformed paths before looking at the data.
+
+    What:     A bad path raises ValueError, even on empty data.
+    Why:      A typo in a path must never be hidden by "nothing matched".
+    Expected: ValueError for "tags" (no $) and "$.a[*]" (does not end with a key).
+    """
+    with pytest.raises(ValueError):
+        sort_lists({}, ["tags"])
+    with pytest.raises(ValueError):
+        sort_lists({}, ["$.a[*]"])
+
+
+def test_sort_lists_makes_runs_that_differ_only_in_order_equal():
+    """Compare results fairly.
+
+    What:     Two results with the same items in a different order become identical.
+    Why:      This is the purpose of the feature: no false failures when a server
+              returns an unordered collection in a different order.
+    Expected: The raw results differ, but the results after sorting are equal.
+    """
+    first = {"notes": [{"id": 1, "t": "a"}, {"id": 2, "t": "b"}, {"id": 3, "t": "c"}]}
+    second = {"notes": [{"id": 3, "t": "c"}, {"id": 1, "t": "a"}, {"id": 2, "t": "b"}]}
+    assert first != second
+    assert sort_lists(first, ["$.notes"]) == sort_lists(second, ["$.notes"])
