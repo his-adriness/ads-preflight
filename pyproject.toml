@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,10 +7,22 @@ name = "mcp-doctor"
 version = "0.1.0"
 description = "A checkup for MCP servers: inspect, test and lint."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Adrian Castrillo" }]
+keywords = ["mcp", "model-context-protocol", "testing", "lint", "inspector"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
-    "mcp>=1.0",
+    "mcp>=2,<3",
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2",
@@ -20,6 +32,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
 fuzz = ["hypothesis>=6"]
+
+[project.urls]
+Homepage = "https://github.com/his-adriness/mcp-doctor"
+Repository = "https://github.com/his-adriness/mcp-doctor"
+Issues = "https://github.com/his-adriness/mcp-doctor/issues"
 
 [project.scripts]
 mcp-doctor = "mcpdoctor.cli:app"
