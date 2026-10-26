@@ -90,7 +90,7 @@ mcp-doctor run tests.yaml -- python server.py
 
 ## Development
 
-You need Python 3.10 or newer.
+You need Python 3.11 or newer (the MCP SDK it builds on requires it).
 
 ```bash
 git clone https://github.com/his-adriness/mcp-doctor.git
