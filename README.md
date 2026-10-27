@@ -205,12 +205,12 @@ ads-preflight/
 │  ├─ lint_rules.py   # the eight core lint rules
 │  ├─ linter.py       # lint(tools), failed(findings)
 │  ├─ cli.py          # lint works on a tools file; inspect and run are stubs
-│  ├─ client.py       # MCP SDK client and transports (not built yet)
+│  ├─ client.py       # connect(): start a server over stdio, list tools, call allowed tools
 │  ├─ runner.py       # test execution (not built yet)
 │  ├─ assertions.py   # expectation types (not built yet)
 │  └─ reporters/      # terminal and json reports (junit not built yet)
 ├─ examples/
-│  ├─ servers/        # a good server and a deliberately broken one (not built yet)
+│  ├─ servers/        # notes_server.py, a small well-formed server (a broken one is planned)
 │  └─ tests/          # sample test files (not built yet)
 ├─ tests/             # tests for the tool itself
 └─ .github/workflows/ci.yml
