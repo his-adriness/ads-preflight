@@ -4,7 +4,7 @@
 
 > Preflight checks for ad-platform MCP servers: lint their tools, test their behaviour, and gate what an AI agent is allowed to do.
 
-**Status:** early development. The data models, the normalization toolkit, the tools-file loader and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet. This is an independent project, not affiliated with Amazon or any ad platform.
+**Status:** early development. `lint --tools-file` works on a saved `tools/list` response. `inspect`, `run` and linting a live server print "not implemented yet", because the MCP client is not built. This is an independent project, not affiliated with Amazon or any ad platform.
 
 ## Why
 
@@ -109,25 +109,56 @@ After normalizing, the result looks like this:
 
 Path syntax is a small subset of JSONPath: `$`, `.key`, `[*]` (every list item) and `[0]` (one item). A path must end with a key.
 
+### `lint`
+
+`lint` checks a server's tool definitions against eight rules, without calling any tool. Errors fail the run (exit code 1), warnings only fail it with `--strict`, and a file that cannot be read exits with 2.
+
+| Rule | Severity | Catches |
+|---|---|---|
+| `core.duplicate-name` | error | Two tools with the same name |
+| `core.wrong-schema-key` | error | `input_schema` or `parameters` instead of `inputSchema` |
+| `core.hint-not-boolean` | error | A hint such as `"readOnlyHint": "true"` |
+| `core.empty-tool-list` | warning | A server that lists no tools |
+| `core.missing-description` | warning | A tool the model has nothing to choose by |
+| `core.missing-input-schema` | warning | A tool whose arguments are not described |
+| `core.no-access-hint` | warning | A tool that does not say whether it is read-only |
+| `core.hint-conflict` | warning | A tool marked both read-only and destructive |
+
+```bash
+ads-preflight lint --tools-file tools.json
+ads-preflight lint --tools-file tools.json --format json --strict
+```
+
+```
+tools.json: 3 tools, 1 error, 1 warning
+
+error    core.wrong-schema-key     create_note  has 'input_schema', which MCP clients do not read
+         fix: rename it to 'inputSchema'
+warning  core.missing-description  delete_note  has no description for the model to read
+         fix: describe what the tool does and when to use it
+```
+
+Text from the server is shown with control characters escaped, because a tools file may come from a hostile server.
+
 ### Command line
 
-The `ads-preflight` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
+The `ads-preflight` command is installed with the package. `lint --tools-file` works. `inspect`, `run` and `lint` with a server command check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
 
 ```bash
 ads-preflight --version
+ads-preflight lint --tools-file tools.json
 ads-preflight inspect -- python server.py
-ads-preflight lint -- python server.py
 ads-preflight run tests.yaml -- python server.py
 ```
 
 ## Planned
 
 - A mock ads MCP server with synthetic data, and an MCP client with a basic `inspect`
-- `lint`: audit tool definitions (command exists, logic does not)
+- `lint` of a live server (works today on a saved tools file)
 - `check`: decide whether one proposed tool call is allowed, needs approval, or is blocked, using a policy file. It reads the call as JSON, so it can run from a Claude Code hook or in CI
 - `run`: execute YAML test files against a server (command exists, logic does not)
 - Data checks on tool results: totals, freshness, currency
-- Reports: terminal, JSON and JUnit XML, with non-zero exit codes for CI
+- A JUnit XML report for CI
 - A demo agent that uses Claude through the gate, and a small evaluation of what the gate catches
 - Later: an MCP proxy that applies the policy to every call, and an Amazon Ads adapter once its tool names are verified
 
@@ -169,13 +200,15 @@ ads-preflight/
 ├─ src/ads_preflight/
 │  ├─ models.py       # CallRecord, ToolDef, ToolAnnotations
 │  ├─ normalize.py    # scrub, remove_paths, sort_lists, normalize
-│  ├─ tools_file.py    # load_tools, parse_tools: read a saved tools/list response
-│  ├─ cli.py          # inspect, run and lint commands (stubs for now)
+│  ├─ tools_file.py   # load_tools, parse_tools: read a saved tools/list response
+│  ├─ findings.py     # Finding: one problem a check reports
+│  ├─ lint_rules.py   # the eight core lint rules
+│  ├─ linter.py       # lint(tools), failed(findings)
+│  ├─ cli.py          # lint works on a tools file; inspect and run are stubs
 │  ├─ client.py       # MCP SDK client and transports (not built yet)
 │  ├─ runner.py       # test execution (not built yet)
 │  ├─ assertions.py   # expectation types (not built yet)
-│  ├─ lint_rules.py   # lint rules (not built yet)
-│  └─ reporters/      # terminal, json, junit (not built yet)
+│  └─ reporters/      # terminal and json reports (junit not built yet)
 ├─ examples/
 │  ├─ servers/        # a good server and a deliberately broken one (not built yet)
 │  └─ tests/          # sample test files (not built yet)
@@ -196,6 +229,8 @@ ads-preflight/
 - **Errors say where, and name common mistakes.** Each one names the file, the tool's position and name, and the field. Loading stops at the first invalid tool. A saved server error response, JSON with comments or trailing commas, and tool definitions written for OpenAI or Gemini each get their own message. Files saved as UTF-8 with a byte order mark load, and a UTF-16 file (a common PowerShell result) gets a message that says to save it as UTF-8.
 - **No conversion between tool formats.** A file in another API's format is the wrong file, and an MCP server that sends `input_schema` has a bug. Silently accepting either would hide it.
 - **Only `result` is normalized.** Latency is real measured data, so compare `.result`, not whole records.
+- **One problem, one finding.** Rules that overlap stay quiet: a tool with `input_schema` gets the wrong-key error, not also a missing-schema warning.
+- **The report is plain text, not a Rich table.** It is easy to read, to copy and to test, and color is added only when the output is a terminal.
 
 ## Known limitations
 

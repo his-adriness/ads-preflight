@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from ads_preflight.findings import Finding
 from ads_preflight.lint_rules import RULES
-from ads_preflight.linter import lint
+from ads_preflight.linter import failed, lint
 from ads_preflight.models import ToolDef
 
 
@@ -152,3 +152,54 @@ def test_the_same_mistake_is_not_reported_twice():
         "core.hint-not-boolean",
         "core.wrong-schema-key",
     ]
+
+
+# --- Deciding whether a run fails -----------------------------------------------------
+
+
+def finding(severity):
+    return Finding(rule="core.x", severity=severity, message="m")
+
+
+def test_no_findings_do_not_fail():
+    """Decide on an empty list of findings.
+
+    What:     Nothing found means the run passes, with or without strict.
+    Why:      A clean server must exit 0.
+    Expected: False both ways.
+    """
+    assert failed([]) is False
+    assert failed([], strict=True) is False
+
+
+def test_an_error_fails_the_run():
+    """Decide on a list with one error.
+
+    What:     An error fails the run, strict or not.
+    Why:      Errors are the findings that block a build.
+    Expected: True both ways.
+    """
+    assert failed([finding("error")]) is True
+    assert failed([finding("error")], strict=True) is True
+
+
+def test_warnings_fail_only_in_strict_mode():
+    """Decide on a list with only warnings.
+
+    What:     Warnings pass by default and fail with strict.
+    Why:      Warnings are advice, but some teams want them to block.
+    Expected: False by default, True with strict.
+    """
+    assert failed([finding("warning")]) is False
+    assert failed([finding("warning")], strict=True) is True
+
+
+def test_info_never_fails_the_run():
+    """Decide on a list with only info findings.
+
+    What:     Info passes even with strict.
+    Why:      Info is a note, never a reason to stop.
+    Expected: False both ways.
+    """
+    assert failed([finding("info")]) is False
+    assert failed([finding("info")], strict=True) is False

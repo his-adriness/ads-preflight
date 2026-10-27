@@ -1,0 +1,43 @@
+{
+  "tools": [
+    {
+      "name": "list_notes",
+      "description": "List the user's notes, newest first.",
+      "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer" } } },
+      "annotations": { "readOnlyHint": true }
+    },
+    {
+      "name": "create_note",
+      "description": "Create a note.",
+      "input_schema": { "type": "object", "properties": { "text": { "type": "string" } } },
+      "annotations": { "readOnlyHint": false }
+    },
+    {
+      "name": "delete_note",
+      "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } },
+      "annotations": { "readOnlyHint": false, "destructiveHint": true }
+    },
+    {
+      "name": "search_notes",
+      "description": "Search notes by text.",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } },
+      "annotations": { "readOnlyHint": "true" }
+    },
+    {
+      "name": "export_notes",
+      "description": "Export all notes to a file.",
+      "inputSchema": { "type": "object" },
+      "annotations": { "readOnlyHint": true, "destructiveHint": true }
+    },
+    {
+      "name": "archive_note",
+      "description": "Move a note to the archive."
+    },
+    {
+      "name": "list_notes",
+      "description": "List notes (second definition).",
+      "inputSchema": { "type": "object" },
+      "annotations": { "readOnlyHint": true }
+    }
+  ]
+}

@@ -25,3 +25,9 @@ def lint(tools: Sequence[ToolDef], rules: Sequence[Rule] | None = None) -> list[
         for problem in rule.check(tools)
     ]
     return sorted(findings, key=lambda finding: SEVERITY_RANK[finding.severity])
+
+
+def failed(findings: Sequence[Finding], strict: bool = False) -> bool:
+    """True if the findings should fail a run: any error, or any warning with `strict`."""
+    blocking = {"error", "warning"} if strict else {"error"}
+    return any(finding.severity in blocking for finding in findings)
