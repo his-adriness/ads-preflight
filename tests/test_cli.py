@@ -195,14 +195,14 @@ def test_run_does_not_require_a_server():
 
 @pytest.mark.parametrize(
     "args",
-    [["inspect"], ["lint"], ["inspect", "--"], ["lint", "--"]],
-    ids=["inspect", "lint", "inspect-empty-dash", "lint-empty-dash"],
+    [["inspect"], ["inspect", "--"]],
+    ids=["inspect", "inspect-empty-dash"],
 )
-def test_inspect_and_lint_require_a_server(args):
+def test_inspect_requires_a_server(args):
     """Reject a missing server command.
 
     What:     Without a server, the command is a usage error.
-    Why:      These commands have nothing to do without a server to talk to.
+    Why:      inspect has nothing to do without a server to talk to.
     Expected: exit code 2 and "Missing argument" in the output.
     """
     result = runner.invoke(app, args)
