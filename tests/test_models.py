@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
-from mcpdoctor.models import CallRecord
+from ads_preflight.models import CallRecord
 
 
 def make_record(**overrides):

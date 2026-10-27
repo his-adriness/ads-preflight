@@ -12,8 +12,8 @@ import re
 
 import pytest
 
-from mcpdoctor.models import CallRecord
-from mcpdoctor.normalize import normalize, parse_path, remove_paths, scrub, sort_lists
+from ads_preflight.models import CallRecord
+from ads_preflight.normalize import normalize, parse_path, remove_paths, scrub, sort_lists
 
 DIGITS = [(re.compile(r"\d+"), "<N>")]
 

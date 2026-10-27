@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from mcpdoctor.models import ToolDef
+from ads_preflight.models import ToolDef
 
 
 class ToolsFileError(Exception):
@@ -108,12 +108,12 @@ def _other_format_hint(item: dict[str, Any]) -> str | None:
     if isinstance(item.get("function"), dict):
         return (
             "looks like an OpenAI function definition ('type' and 'function'). "
-            "mcp-doctor reads MCP tools, where 'name' is at the top level of each tool"
+            "ads-preflight reads MCP tools, where 'name' is at the top level of each tool"
         )
     if "functionDeclarations" in item:
         return (
             "looks like a Gemini tool ('functionDeclarations'). "
-            "mcp-doctor reads MCP tools, where each tool has its own 'name'"
+            "ads-preflight reads MCP tools, where each tool has its own 'name'"
         )
     return None
 

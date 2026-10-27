@@ -3,15 +3,15 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-doctor"
+name = "ads-preflight"
 version = "0.1.0"
-description = "A checkup for MCP servers: inspect, test and lint."
+description = "Preflight checks for ad-platform MCP servers: lint tools, test behaviour, gate agent actions."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Adrian Castrillo" }]
-keywords = ["mcp", "model-context-protocol", "testing", "lint", "inspector"]
+keywords = ["mcp", "model-context-protocol", "advertising", "ai-agents", "safety", "lint"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -24,33 +24,29 @@ classifiers = [
 dependencies = [
     "mcp>=2,<3",
     "typer>=0.12",
-    "rich>=13",
     "pydantic>=2",
-    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
-fuzz = ["hypothesis>=6"]
+dev = ["pytest>=8", "ruff>=0.5"]
 
 [project.urls]
-Homepage = "https://github.com/his-adriness/mcp-doctor"
-Repository = "https://github.com/his-adriness/mcp-doctor"
-Issues = "https://github.com/his-adriness/mcp-doctor/issues"
+Homepage = "https://github.com/his-adriness/ads-preflight"
+Repository = "https://github.com/his-adriness/ads-preflight"
+Issues = "https://github.com/his-adriness/ads-preflight/issues"
 
 [project.scripts]
-mcp-doctor = "mcpdoctor.cli:app"
+ads-preflight = "ads_preflight.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcpdoctor"]
+packages = ["src/ads_preflight"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = ["E", "W", "F", "I", "B", "UP"]

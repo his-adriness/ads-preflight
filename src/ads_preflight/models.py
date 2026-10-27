@@ -1,4 +1,4 @@
-"""Data models shared across mcp-doctor."""
+"""Data models shared across ads-preflight."""
 
 from typing import Any, Literal
 
@@ -9,7 +9,7 @@ DeclaredAccess = Literal["read", "write", "unknown"]
 
 
 class CallRecord(BaseModel):
-    """Immutable record of a single MCP tool call, shared by every mcp-doctor feature.
+    """Immutable record of a single MCP tool call, shared by every ads-preflight feature.
 
     The client creates one per call, and the runner, linter, reporters and snapshots
     all read from it. Records serialize to JSON, one per line in JSONL sessions.

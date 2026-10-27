@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from mcpdoctor.models import ToolDef
-from mcpdoctor.toolsfile import ToolsFileError, load_tools, parse_tools
+from ads_preflight.models import ToolDef
+from ads_preflight.tools_file import ToolsFileError, load_tools, parse_tools
 
 TOOLS = [
     {"name": "list_notes", "description": "List notes.", "annotations": {"readOnlyHint": True}},

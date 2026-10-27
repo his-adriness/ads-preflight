@@ -12,7 +12,7 @@ import pickle
 import pytest
 from pydantic import ValidationError
 
-from mcpdoctor.models import ToolAnnotations, ToolDef
+from ads_preflight.models import ToolAnnotations, ToolDef
 
 # A tool as a server typically lists it, with every standard field.
 FULL_TOOL = {

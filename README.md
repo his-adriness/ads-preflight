@@ -1,18 +1,60 @@
-# mcp-doctor
+# ads-preflight
 
-> A checkup for MCP servers: inspect, test and lint.
+[![CI](https://github.com/his-adriness/ads-preflight/actions/workflows/ci.yml/badge.svg)](https://github.com/his-adriness/ads-preflight/actions/workflows/ci.yml)
 
-**Status:** early development. The data model, the normalization toolkit and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet.
+> Preflight checks for ad-platform MCP servers: lint their tools, test their behaviour, and gate what an AI agent is allowed to do.
+
+**Status:** early development. The data models, the normalization toolkit, the tools-file loader and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet. This is an independent project, not affiliated with Amazon or any ad platform.
 
 ## Why
 
-MCP server authors usually test by chatting with an AI client and hoping it works. That misses broken schemas, vague tool descriptions, crashes on bad input, and regressions after changes. `mcp-doctor` aims to make those checks repeatable and CI-friendly.
+An AI agent connected to an ad account can change budgets, bids and campaigns. Chatting with it and hoping it behaves is not a safety check. `ads-preflight` is meant to make three checks repeatable:
+
+1. **Lint:** are the server's tools defined safely, with honest read/write hints, clear descriptions and bounded inputs?
+2. **Gate:** may a proposed call run, does it need human approval, or is it blocked? The decision is made in code, not in a prompt.
+3. **Verify:** can the data the agent relied on be trusted (totals add up, data is fresh, currencies match)?
+
+The core is generic MCP tooling. Ad-specific rules will live in a separate layer. A mock ads server with synthetic data is planned, so anyone can run the project without access to a real ad account.
 
 ## What works today
 
 ### `CallRecord`
 
 An immutable record of one tool call: the tool name, the arguments, the result, an error flag and the latency in milliseconds. Every feature reads from this one shape. It serializes to JSON (one record per line in JSONL), and `.text` returns the text content of a result.
+
+### `ToolDef`
+
+One tool as a server lists it in its `tools/list` response: `name`, `title`, `description`, `inputSchema`, `outputSchema` and `annotations`. The linter and the inspector read from this shape.
+
+```python
+from ads_preflight.models import ToolDef
+
+tool = ToolDef.model_validate({
+    "name": "list_notes",
+    "description": "List the user's notes.",
+    "annotations": {"readOnlyHint": True},
+})
+tool.declared_access   # "read"
+```
+
+`declared_access` reports what the server *claims* about the tool: `"read"` if `readOnlyHint` is true, `"write"` if it is false, and `"unknown"` if the server said nothing or sent something that is not a boolean. Silence is never treated as safe, and a claim is not proof.
+
+### Tools file
+
+A saved `tools/list` response lets tools be checked without a live server and without calling anything. `parse_tools(data)` reads parsed JSON, and `load_tools(path)` reads a file. Both accept a bare list of tools, `{"tools": [...]}`, or a whole JSON-RPC response with the tools under `result`.
+
+```python
+from ads_preflight.tools_file import parse_tools
+
+tools = parse_tools({"tools": [{"name": "list_notes"}, {"name": "create_note"}]})
+[tool.name for tool in tools]   # ["list_notes", "create_note"]
+```
+
+A problem raises `ToolsFileError`, with a message that says where it is:
+
+```
+tools.json: tool #2 ('create_note'): description: Input should be a valid string
+```
 
 ### `normalize`
 
@@ -26,8 +68,8 @@ Two runs of the same tool call rarely return identical output: IDs and timestamp
 | `normalize(record, ...)` | Applies all three to a `CallRecord`'s result, in that order, and returns a new record |
 
 ```python
-from mcpdoctor.models import CallRecord
-from mcpdoctor.normalize import normalize
+from ads_preflight.models import CallRecord
+from ads_preflight.normalize import normalize
 
 a = CallRecord(
     tool="list_notes", arguments={}, latency_ms=12.0,
@@ -69,32 +111,33 @@ Path syntax is a small subset of JSONPath: `$`, `.key`, `[*]` (every list item) 
 
 ### Command line
 
-The `mcp-doctor` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
+The `ads-preflight` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
 
 ```bash
-mcp-doctor --version
-mcp-doctor inspect -- python server.py
-mcp-doctor lint -- python server.py
-mcp-doctor run tests.yaml -- python server.py
+ads-preflight --version
+ads-preflight inspect -- python server.py
+ads-preflight lint -- python server.py
+ads-preflight run tests.yaml -- python server.py
 ```
 
 ## Planned
 
-- `inspect`: connect to a server and list its tools, resources and prompts (command exists, logic does not)
+- A mock ads MCP server with synthetic data, and an MCP client with a basic `inspect`
+- `lint`: audit tool definitions (command exists, logic does not)
+- `check`: decide whether one proposed tool call is allowed, needs approval, or is blocked, using a policy file. It reads the call as JSON, so it can run from a Claude Code hook or in CI
 - `run`: execute YAML test files against a server (command exists, logic does not)
-- `lint`: audit a server automatically: schemas, descriptions, naming, error handling, timeouts, safety hints (command exists, logic does not)
-- `snapshot`: save outputs and tool schemas, and classify drift
-- `bench`: latency and throughput per tool
+- Data checks on tool results: totals, freshness, currency
 - Reports: terminal, JSON and JUnit XML, with non-zero exit codes for CI
-- A reusable GitHub Action
+- A demo agent that uses Claude through the gate, and a small evaluation of what the gate catches
+- Later: an MCP proxy that applies the policy to every call, and an Amazon Ads adapter once its tool names are verified
 
 ## Development
 
 You need Python 3.11 or newer (the MCP SDK it builds on requires it).
 
 ```bash
-git clone https://github.com/his-adriness/mcp-doctor.git
-cd mcp-doctor
+git clone https://github.com/his-adriness/ads-preflight.git
+cd ads-preflight
 python -m venv .venv
 ```
 
@@ -122,10 +165,11 @@ Run both checks before pushing. CI runs the same two commands.
 ## Project layout
 
 ```
-mcp-doctor/
-├─ src/mcpdoctor/
-│  ├─ models.py       # CallRecord
+ads-preflight/
+├─ src/ads_preflight/
+│  ├─ models.py       # CallRecord, ToolDef, ToolAnnotations
 │  ├─ normalize.py    # scrub, remove_paths, sort_lists, normalize
+│  ├─ tools_file.py    # load_tools, parse_tools: read a saved tools/list response
 │  ├─ cli.py          # inspect, run and lint commands (stubs for now)
 │  ├─ client.py       # MCP SDK client and transports (not built yet)
 │  ├─ runner.py       # test execution (not built yet)
@@ -133,8 +177,8 @@ mcp-doctor/
 │  ├─ lint_rules.py   # lint rules (not built yet)
 │  └─ reporters/      # terminal, json, junit (not built yet)
 ├─ examples/
-│  ├─ servers/        # a good server and a deliberately broken one
-│  └─ tests/          # sample test files
+│  ├─ servers/        # a good server and a deliberately broken one (not built yet)
+│  └─ tests/          # sample test files (not built yet)
 ├─ tests/             # tests for the tool itself
 └─ .github/workflows/ci.yml
 ```
@@ -145,6 +189,12 @@ mcp-doctor/
 - **Normalization is opt-in by path.** Some lists are order-meaningful, such as MCP content blocks. Only the lists you name are sorted, and only the fields you name are removed.
 - **Sorting runs last.** Lists are ordered by their scrubbed content. Sorting first would order them by values that change on every run.
 - **Typos fail loudly.** A malformed path raises an error even when it would match nothing. A well-formed path that matches nothing is skipped, because a volatile field may be absent from some results.
+- **`ToolDef` is lenient on purpose.** Only `name` is required, so a server with a missing description or schema can still be loaded and reported on. Unknown fields are kept, because vendors add their own and rules for them need to see them.
+- **Hints are stored as sent, and unsent is not false.** A hint that was not sent stays `None`. A hint that is not a real boolean, such as the string `"true"`, still loads so a lint rule can report it, and it counts as `"unknown"` access. A safety check must not guess what a server meant.
+- **Field names match the wire format** (`inputSchema`, `readOnlyHint`), like the official MCP SDK, so what a server sent is what you get back. This is why `ToolDef` uses camelCase while `CallRecord`, which we create ourselves, uses snake_case. A key spelled `input_schema` is kept as an unknown field so the linter can report it.
+- **An empty tools list and duplicate names are not errors.** They are problems in the server, so a lint rule reports them. The loader only rejects files it cannot read.
+- **Errors say where, and name common mistakes.** Each one names the file, the tool's position and name, and the field. Loading stops at the first invalid tool. A saved server error response, JSON with comments or trailing commas, and tool definitions written for OpenAI or Gemini each get their own message. Files saved as UTF-8 with a byte order mark load, and a UTF-16 file (a common PowerShell result) gets a message that says to save it as UTF-8.
+- **No conversion between tool formats.** A file in another API's format is the wrong file, and an MCP server that sends `input_schema` has a bug. Silently accepting either would hide it.
 - **Only `result` is normalized.** Latency is real measured data, so compare `.result`, not whole records.
 
 ## Known limitations

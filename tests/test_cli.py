@@ -5,8 +5,8 @@ import typer
 from typer.main import get_command
 from typer.testing import CliRunner
 
-import mcpdoctor
-from mcpdoctor.cli import app
+import ads_preflight
+from ads_preflight.cli import app
 
 runner = CliRunner()
 
@@ -17,8 +17,8 @@ runner = CliRunner()
 def test_app_is_a_typer_app():
     """Expose the app that pyproject.toml points to.
 
-    What:     mcpdoctor.cli.app is a Typer app.
-    Why:      pyproject.toml maps the mcp-doctor command to mcpdoctor.cli:app. If it is
+    What:     ads_preflight.cli.app is a Typer app.
+    Why:      pyproject.toml maps the ads-preflight command to ads_preflight.cli:app. If it is
               missing or has another type, the installed command breaks.
     Expected: isinstance(app, typer.Typer)
     """
@@ -33,20 +33,20 @@ def test_version_is_known():
               would also hide the real version in every message that prints it.
     Expected: __version__ is a non-empty string other than "unknown".
     """
-    assert isinstance(mcpdoctor.__version__, str)
-    assert mcpdoctor.__version__ not in ("", "unknown")
+    assert isinstance(ads_preflight.__version__, str)
+    assert ads_preflight.__version__ not in ("", "unknown")
 
 
 def test_version_flag_prints_name_and_version():
     """Print the version for --version.
 
-    What:     The output is "mcp-doctor <version>" and the exit code is 0.
+    What:     The output is "ads-preflight <version>" and the exit code is 0.
     Why:      The first thing people run to check the install.
-    Expected: output == "mcp-doctor " + __version__
+    Expected: output == "ads-preflight " + __version__
     """
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == f"mcp-doctor {mcpdoctor.__version__}"
+    assert result.output.strip() == f"ads-preflight {ads_preflight.__version__}"
 
 
 # --- Help -------------------------------------------------------------------
