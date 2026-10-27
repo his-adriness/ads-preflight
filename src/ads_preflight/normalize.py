@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from mcpdoctor.models import CallRecord
+from ads_preflight.models import CallRecord
 
 Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
 

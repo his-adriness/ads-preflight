@@ -1,0 +1,650 @@
+diff --git a/.gitignore b/.gitignore
+index ccf2d41..67647d1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,7 @@ build/
+ *.jsonl
+ !examples/**/*.jsonl
+ .env
++.mypy_cache/
++.vscode/
++.idea/
++.DS_Store
+diff --git a/README.md b/README.md
+index b8d9d49..9c62366 100644
+--- a/README.md
++++ b/README.md
+@@ -1,12 +1,20 @@
+-# mcp-doctor
++# ads-preflight
+ 
+-> A checkup for MCP servers: inspect, test and lint.
++[![CI](https://github.com/his-adriness/ads-preflight/actions/workflows/ci.yml/badge.svg)](https://github.com/his-adriness/ads-preflight/actions/workflows/ci.yml)
+ 
+-**Status:** early development. The data model, the normalization toolkit and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet.
++> Preflight checks for ad-platform MCP servers: lint their tools, test their behaviour, and gate what an AI agent is allowed to do.
++
++**Status:** early development. The data models, the normalization toolkit, the tools-file loader and the command-line skeleton are built and tested. The commands exist but only print "not implemented yet", because the MCP client is not built, so there is nothing useful to run yet. This is an independent project, not affiliated with Amazon or any ad platform.
+ 
+ ## Why
+ 
+-MCP server authors usually test by chatting with an AI client and hoping it works. That misses broken schemas, vague tool descriptions, crashes on bad input, and regressions after changes. `mcp-doctor` aims to make those checks repeatable and CI-friendly.
++An AI agent connected to an ad account can change budgets, bids and campaigns. Chatting with it and hoping it behaves is not a safety check. `ads-preflight` is meant to make three checks repeatable:
++
++1. **Lint:** are the server's tools defined safely, with honest read/write hints, clear descriptions and bounded inputs?
++2. **Gate:** may a proposed call run, does it need human approval, or is it blocked? The decision is made in code, not in a prompt.
++3. **Verify:** can the data the agent relied on be trusted (totals add up, data is fresh, currencies match)?
++
++The core is generic MCP tooling. Ad-specific rules will live in a separate layer. A mock ads server with synthetic data is planned, so anyone can run the project without access to a real ad account.
+ 
+ ## What works today
+ 
+@@ -14,6 +22,40 @@ MCP server authors usually test by chatting with an AI client and hoping it work
+ 
+ An immutable record of one tool call: the tool name, the arguments, the result, an error flag and the latency in milliseconds. Every feature reads from this one shape. It serializes to JSON (one record per line in JSONL), and `.text` returns the text content of a result.
+ 
++### `ToolDef`
++
++One tool as a server lists it in its `tools/list` response: `name`, `title`, `description`, `inputSchema`, `outputSchema` and `annotations`. The linter and the inspector read from this shape.
++
++```python
++from ads_preflight.models import ToolDef
++
++tool = ToolDef.model_validate({
++    "name": "list_notes",
++    "description": "List the user's notes.",
++    "annotations": {"readOnlyHint": True},
++})
++tool.declared_access   # "read"
++```
++
++`declared_access` reports what the server *claims* about the tool: `"read"` if `readOnlyHint` is true, `"write"` if it is false, and `"unknown"` if the server said nothing or sent something that is not a boolean. Silence is never treated as safe, and a claim is not proof.
++
++### Tools file
++
++A saved `tools/list` response lets tools be checked without a live server and without calling anything. `parse_tools(data)` reads parsed JSON, and `load_tools(path)` reads a file. Both accept a bare list of tools, `{"tools": [...]}`, or a whole JSON-RPC response with the tools under `result`.
++
++```python
++from ads_preflight.tools_file import parse_tools
++
++tools = parse_tools({"tools": [{"name": "list_notes"}, {"name": "create_note"}]})
++[tool.name for tool in tools]   # ["list_notes", "create_note"]
++```
++
++A problem raises `ToolsFileError`, with a message that says where it is:
++
++```
++tools.json: tool #2 ('create_note'): description: Input should be a valid string
++```
++
+ ### `normalize`
+ 
+ Two runs of the same tool call rarely return identical output: IDs and timestamps change, and unordered collections come back in a different order. The `normalize` module removes those differences so results can be compared fairly.
+@@ -26,8 +68,8 @@ Two runs of the same tool call rarely return identical output: IDs and timestamp
+ | `normalize(record, ...)` | Applies all three to a `CallRecord`'s result, in that order, and returns a new record |
+ 
+ ```python
+-from mcpdoctor.models import CallRecord
+-from mcpdoctor.normalize import normalize
++from ads_preflight.models import CallRecord
++from ads_preflight.normalize import normalize
+ 
+ a = CallRecord(
+     tool="list_notes", arguments={}, latency_ms=12.0,
+@@ -69,32 +111,33 @@ Path syntax is a small subset of JSONPath: `$`, `.key`, `[*]` (every list item)
+ 
+ ### Command line
+ 
+-The `mcp-doctor` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
++The `ads-preflight` command is installed with the package. It has three commands, which are stubs for now: they check their arguments, print "not implemented yet" and exit with code 1. The server command goes after a double dash, and everything after it is passed through untouched:
+ 
+ ```bash
+-mcp-doctor --version
+-mcp-doctor inspect -- python server.py
+-mcp-doctor lint -- python server.py
+-mcp-doctor run tests.yaml -- python server.py
++ads-preflight --version
++ads-preflight inspect -- python server.py
++ads-preflight lint -- python server.py
++ads-preflight run tests.yaml -- python server.py
+ ```
+ 
+ ## Planned
+ 
+-- `inspect`: connect to a server and list its tools, resources and prompts (command exists, logic does not)
++- A mock ads MCP server with synthetic data, and an MCP client with a basic `inspect`
++- `lint`: audit tool definitions (command exists, logic does not)
++- `check`: decide whether one proposed tool call is allowed, needs approval, or is blocked, using a policy file. It reads the call as JSON, so it can run from a Claude Code hook or in CI
+ - `run`: execute YAML test files against a server (command exists, logic does not)
+-- `lint`: audit a server automatically: schemas, descriptions, naming, error handling, timeouts, safety hints (command exists, logic does not)
+-- `snapshot`: save outputs and tool schemas, and classify drift
+-- `bench`: latency and throughput per tool
++- Data checks on tool results: totals, freshness, currency
+ - Reports: terminal, JSON and JUnit XML, with non-zero exit codes for CI
+-- A reusable GitHub Action
++- A demo agent that uses Claude through the gate, and a small evaluation of what the gate catches
++- Later: an MCP proxy that applies the policy to every call, and an Amazon Ads adapter once its tool names are verified
+ 
+ ## Development
+ 
+ You need Python 3.11 or newer (the MCP SDK it builds on requires it).
+ 
+ ```bash
+-git clone https://github.com/his-adriness/mcp-doctor.git
+-cd mcp-doctor
++git clone https://github.com/his-adriness/ads-preflight.git
++cd ads-preflight
+ python -m venv .venv
+ ```
+ 
+@@ -122,10 +165,11 @@ Run both checks before pushing. CI runs the same two commands.
+ ## Project layout
+ 
+ ```
+-mcp-doctor/
+-├─ src/mcpdoctor/
+-│  ├─ models.py       # CallRecord
++ads-preflight/
++├─ src/ads_preflight/
++│  ├─ models.py       # CallRecord, ToolDef, ToolAnnotations
+ │  ├─ normalize.py    # scrub, remove_paths, sort_lists, normalize
++│  ├─ tools_file.py    # load_tools, parse_tools: read a saved tools/list response
+ │  ├─ cli.py          # inspect, run and lint commands (stubs for now)
+ │  ├─ client.py       # MCP SDK client and transports (not built yet)
+ │  ├─ runner.py       # test execution (not built yet)
+@@ -133,8 +177,8 @@ mcp-doctor/
+ │  ├─ lint_rules.py   # lint rules (not built yet)
+ │  └─ reporters/      # terminal, json, junit (not built yet)
+ ├─ examples/
+-│  ├─ servers/        # a good server and a deliberately broken one
+-│  └─ tests/          # sample test files
++│  ├─ servers/        # a good server and a deliberately broken one (not built yet)
++│  └─ tests/          # sample test files (not built yet)
+ ├─ tests/             # tests for the tool itself
+ └─ .github/workflows/ci.yml
+ ```
+@@ -145,6 +189,12 @@ mcp-doctor/
+ - **Normalization is opt-in by path.** Some lists are order-meaningful, such as MCP content blocks. Only the lists you name are sorted, and only the fields you name are removed.
+ - **Sorting runs last.** Lists are ordered by their scrubbed content. Sorting first would order them by values that change on every run.
+ - **Typos fail loudly.** A malformed path raises an error even when it would match nothing. A well-formed path that matches nothing is skipped, because a volatile field may be absent from some results.
++- **`ToolDef` is lenient on purpose.** Only `name` is required, so a server with a missing description or schema can still be loaded and reported on. Unknown fields are kept, because vendors add their own and rules for them need to see them.
++- **Hints are stored as sent, and unsent is not false.** A hint that was not sent stays `None`. A hint that is not a real boolean, such as the string `"true"`, still loads so a lint rule can report it, and it counts as `"unknown"` access. A safety check must not guess what a server meant.
++- **Field names match the wire format** (`inputSchema`, `readOnlyHint`), like the official MCP SDK, so what a server sent is what you get back. This is why `ToolDef` uses camelCase while `CallRecord`, which we create ourselves, uses snake_case. A key spelled `input_schema` is kept as an unknown field so the linter can report it.
++- **An empty tools list and duplicate names are not errors.** They are problems in the server, so a lint rule reports them. The loader only rejects files it cannot read.
++- **Errors say where, and name common mistakes.** Each one names the file, the tool's position and name, and the field. Loading stops at the first invalid tool. A saved server error response, JSON with comments or trailing commas, and tool definitions written for OpenAI or Gemini each get their own message. Files saved as UTF-8 with a byte order mark load, and a UTF-16 file (a common PowerShell result) gets a message that says to save it as UTF-8.
++- **No conversion between tool formats.** A file in another API's format is the wrong file, and an MCP server that sends `input_schema` has a bug. Silently accepting either would hide it.
+ - **Only `result` is normalized.** Latency is real measured data, so compare `.result`, not whole records.
+ 
+ ## Known limitations
+@@ -155,4 +205,4 @@ mcp-doctor/
+ 
+ ## License
+ 
+-MIT. See [LICENSE](LICENSE).
+\ No newline at end of file
++MIT. See [LICENSE](LICENSE).
+diff --git a/docs/decisions/0001-positioning-and-name.md b/docs/decisions/0001-positioning-and-name.md
+new file mode 100644
+index 0000000..41957df
+--- /dev/null
++++ b/docs/decisions/0001-positioning-and-name.md
+@@ -0,0 +1,35 @@
++# 0001: Positioning, name and repository layout
++
++Date: 2026-10-27. Status: accepted.
++
++## Context
++
++The project started as a generic "pytest for MCP servers". Other tools already cover that
++space (`mcp-doctor`, `mcp-lint` and `mcp-probe` are taken). The goal is a portfolio project
++that shows how to build safe AI-agent systems, and the author will have access to the Amazon
++Ads MCP server (open beta, partners only), which other people cannot use.
++
++## Decision
++
++1. **Focus on ad-platform MCP servers.** The tool checks tool definitions (lint), decides
++   whether a proposed call may run (gate), and checks the data an agent relied on (verify).
++2. **Keep the core generic.** Policy and checks refer to tool access and argument patterns.
++   Platform-specific rules go in a separate `ads` layer, and Amazon names in a thin adapter.
++3. **Ship a mock ads server with synthetic data**, so reviewers can run everything without
++   an ad account.
++4. **Enforce in code, not in prompts.** The gate is a pure function,
++   `evaluate(call, tools, policy)`, with no network access. Front ends (CLI, Claude Code hook,
++   later an MCP proxy) call it.
++5. **One repository.** Shared models make a split costly now. Instead, `ads` code may import
++   `core` code and never the reverse, so the generic part can be split out later.
++6. **Name: `ads-preflight`** (package `ads_preflight`). It is not affiliated with any ad platform
++   and avoids platform trademarks. Availability on GitHub, PyPI and npm must be checked before
++   publishing a package.
++
++## Consequences
++
++- The previous scope (`snapshot`, `bench`) is dropped from v0.1.
++- The time-box and kill criterion are reset around the mock server: `inspect` must work over
++  stdio against the mock server and one public MCP server by about 13 November 2026.
++- Nothing derived from live account data is published without checking the partner agreement.
++  Credentials and real account data are never committed.
+diff --git a/pyproject.toml b/pyproject.toml
+index 8876d81..971f6b4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,15 +3,15 @@ requires = ["hatchling>=1.27"]
+ build-backend = "hatchling.build"
+ 
+ [project]
+-name = "mcp-doctor"
++name = "ads-preflight"
+ version = "0.1.0"
+-description = "A checkup for MCP servers: inspect, test and lint."
++description = "Preflight checks for ad-platform MCP servers: lint tools, test behaviour, gate agent actions."
+ readme = "README.md"
+ requires-python = ">=3.11"
+ license = "MIT"
+ license-files = ["LICENSE"]
+ authors = [{ name = "Adrian Castrillo" }]
+-keywords = ["mcp", "model-context-protocol", "testing", "lint", "inspector"]
++keywords = ["mcp", "model-context-protocol", "advertising", "ai-agents", "safety", "lint"]
+ classifiers = [
+     "Development Status :: 3 - Alpha",
+     "Intended Audience :: Developers",
+@@ -24,33 +24,29 @@ classifiers = [
+ dependencies = [
+     "mcp>=2,<3",
+     "typer>=0.12",
+-    "rich>=13",
+     "pydantic>=2",
+-    "pyyaml>=6",
+ ]
+ 
+ [project.optional-dependencies]
+-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+-fuzz = ["hypothesis>=6"]
++dev = ["pytest>=8", "ruff>=0.5"]
+ 
+ [project.urls]
+-Homepage = "https://github.com/his-adriness/mcp-doctor"
+-Repository = "https://github.com/his-adriness/mcp-doctor"
+-Issues = "https://github.com/his-adriness/mcp-doctor/issues"
++Homepage = "https://github.com/his-adriness/ads-preflight"
++Repository = "https://github.com/his-adriness/ads-preflight"
++Issues = "https://github.com/his-adriness/ads-preflight/issues"
+ 
+ [project.scripts]
+-mcp-doctor = "mcpdoctor.cli:app"
++ads-preflight = "ads_preflight.cli:app"
+ 
+ [tool.hatch.build.targets.wheel]
+-packages = ["src/mcpdoctor"]
++packages = ["src/ads_preflight"]
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+-asyncio_mode = "auto"
+ 
+ [tool.ruff]
+ line-length = 100
+ src = ["src", "tests"]
+ 
+ [tool.ruff.lint]
+-select = ["E", "F", "I", "B", "UP"]
++select = ["E", "W", "F", "I", "B", "UP"]
+diff --git a/src/mcpdoctor/__init__.py b/src/ads_preflight/__init__.py
+similarity index 62%
+rename from src/mcpdoctor/__init__.py
+rename to src/ads_preflight/__init__.py
+index fc95781..c02183f 100644
+--- a/src/mcpdoctor/__init__.py
++++ b/src/ads_preflight/__init__.py
+@@ -1,8 +1,8 @@
+-"""mcp-doctor: a checkup for MCP servers."""
++"""ads-preflight: preflight checks for ad-platform MCP servers."""
+ 
+ from importlib.metadata import PackageNotFoundError, version
+ 
+ try:
+-    __version__ = version("mcp-doctor")
++    __version__ = version("ads-preflight")
+ except PackageNotFoundError:  # running from a source tree that was never installed
+     __version__ = "unknown"
+diff --git a/src/mcpdoctor/assertions.py b/src/ads_preflight/assertions.py
+similarity index 100%
+rename from src/mcpdoctor/assertions.py
+rename to src/ads_preflight/assertions.py
+diff --git a/src/mcpdoctor/cli.py b/src/ads_preflight/cli.py
+similarity index 74%
+rename from src/mcpdoctor/cli.py
+rename to src/ads_preflight/cli.py
+index 54a5324..2c37c48 100644
+--- a/src/mcpdoctor/cli.py
++++ b/src/ads_preflight/cli.py
+@@ -1,4 +1,4 @@
+-"""Command-line interface: mcp-doctor inspect, run and lint.
++"""Command-line interface: ads-preflight inspect, run and lint.
+ 
+ The commands are stubs for now. Each one only parses its options and will call
+ library code in other modules once that code exists.
+@@ -10,11 +10,11 @@ from typing import Annotated, NoReturn
+ 
+ import typer
+ 
+-from mcpdoctor import __version__
++from ads_preflight import __version__
+ 
+ app = typer.Typer(
+-    name="mcp-doctor",
+-    help="A checkup for MCP servers: inspect, test and lint.",
++    name="ads-preflight",
++    help="Preflight checks for ad-platform MCP servers: inspect, lint and test.",
+     no_args_is_help=True,
+     add_completion=False,
+ )
+@@ -29,14 +29,14 @@ ServerArg = Annotated[
+ 
+ def _version_callback(value: bool) -> None:
+     if value:
+-        typer.echo(f"mcp-doctor {__version__}")
++        typer.echo(f"ads-preflight {__version__}")
+         raise typer.Exit()
+ 
+ 
+ def _not_implemented(command: str, server: list[str] | None = None) -> NoReturn:
+     """Stop with exit code 1, so a pipeline that calls a stub fails loudly."""
+     detail = f" (server: {shlex.join(server)})" if server else ""
+-    typer.echo(f"mcp-doctor {command}: not implemented yet{detail}", err=True)
++    typer.echo(f"ads-preflight {command}: not implemented yet{detail}", err=True)
+     raise typer.Exit(code=1)
+ 
+ 
+@@ -52,14 +52,14 @@ def main(
+         ),
+     ] = False,
+ ) -> None:
+-    """A checkup for MCP servers: inspect, test and lint."""
++    """Preflight checks for ad-platform MCP servers: inspect, lint and test."""
+ 
+ 
+ @app.command()
+ def inspect(server: ServerArg) -> None:
+     """List a server's tools, resources and prompts.
+ 
+-    Example: mcp-doctor inspect -- python server.py
++    Example: ads-preflight inspect -- python server.py
+     """
+     _not_implemented("inspect", server)
+ 
+@@ -74,7 +74,7 @@ def run(
+ ) -> None:
+     """Run the tests in a YAML file against a server.
+ 
+-    Example: mcp-doctor run tests/notes.yaml -- python server.py
++    Example: ads-preflight run tests/notes.yaml -- python server.py
+     """
+     _not_implemented("run", server)
+ 
+@@ -83,6 +83,6 @@ def run(
+ def lint(server: ServerArg) -> None:
+     """Audit a server for common problems, without needing a test file.
+ 
+-    Example: mcp-doctor lint -- python server.py
++    Example: ads-preflight lint -- python server.py
+     """
+     _not_implemented("lint", server)
+diff --git a/src/mcpdoctor/client.py b/src/ads_preflight/client.py
+similarity index 100%
+rename from src/mcpdoctor/client.py
+rename to src/ads_preflight/client.py
+diff --git a/src/mcpdoctor/lint_rules.py b/src/ads_preflight/lint_rules.py
+similarity index 100%
+rename from src/mcpdoctor/lint_rules.py
+rename to src/ads_preflight/lint_rules.py
+diff --git a/src/mcpdoctor/models.py b/src/ads_preflight/models.py
+similarity index 97%
+rename from src/mcpdoctor/models.py
+rename to src/ads_preflight/models.py
+index a88bbf6..d8db0fd 100644
+--- a/src/mcpdoctor/models.py
++++ b/src/ads_preflight/models.py
+@@ -1,4 +1,4 @@
+-"""Data models shared across mcp-doctor."""
++"""Data models shared across ads-preflight."""
+ 
+ from typing import Any, Literal
+ 
+@@ -9,7 +9,7 @@ DeclaredAccess = Literal["read", "write", "unknown"]
+ 
+ 
+ class CallRecord(BaseModel):
+-    """Immutable record of a single MCP tool call, shared by every mcp-doctor feature.
++    """Immutable record of a single MCP tool call, shared by every ads-preflight feature.
+ 
+     The client creates one per call, and the runner, linter, reporters and snapshots
+     all read from it. Records serialize to JSON, one per line in JSONL sessions.
+@@ -89,4 +89,4 @@ class ToolDef(BaseModel):
+             return "read"
+         if hint is False:
+             return "write"
+-        return "unknown"
+\ No newline at end of file
++        return "unknown"
+diff --git a/src/mcpdoctor/normalize.py b/src/ads_preflight/normalize.py
+similarity index 99%
+rename from src/mcpdoctor/normalize.py
+rename to src/ads_preflight/normalize.py
+index a28fba1..7c7c057 100644
+--- a/src/mcpdoctor/normalize.py
++++ b/src/ads_preflight/normalize.py
+@@ -4,7 +4,7 @@ import json
+ import re
+ from typing import Any
+ 
+-from mcpdoctor.models import CallRecord
++from ads_preflight.models import CallRecord
+ 
+ Scrubber = tuple[re.Pattern[str], str]  # (pattern to find, replacement text)
+ 
+diff --git a/src/mcpdoctor/reporters/__init__.py b/src/ads_preflight/reporters/__init__.py
+similarity index 100%
+rename from src/mcpdoctor/reporters/__init__.py
+rename to src/ads_preflight/reporters/__init__.py
+diff --git a/src/mcpdoctor/reporters/json_reporter.py b/src/ads_preflight/reporters/json_reporter.py
+similarity index 100%
+rename from src/mcpdoctor/reporters/json_reporter.py
+rename to src/ads_preflight/reporters/json_reporter.py
+diff --git a/src/mcpdoctor/reporters/junit.py b/src/ads_preflight/reporters/junit.py
+similarity index 100%
+rename from src/mcpdoctor/reporters/junit.py
+rename to src/ads_preflight/reporters/junit.py
+diff --git a/src/mcpdoctor/reporters/terminal.py b/src/ads_preflight/reporters/terminal.py
+similarity index 100%
+rename from src/mcpdoctor/reporters/terminal.py
+rename to src/ads_preflight/reporters/terminal.py
+diff --git a/src/mcpdoctor/runner.py b/src/ads_preflight/runner.py
+similarity index 100%
+rename from src/mcpdoctor/runner.py
+rename to src/ads_preflight/runner.py
+diff --git a/src/mcpdoctor/toolsfile.py b/src/ads_preflight/tools_file.py
+similarity index 95%
+rename from src/mcpdoctor/toolsfile.py
+rename to src/ads_preflight/tools_file.py
+index 54a2a19..4df1753 100644
+--- a/src/mcpdoctor/toolsfile.py
++++ b/src/ads_preflight/tools_file.py
+@@ -7,7 +7,7 @@ from typing import Any
+ 
+ from pydantic import ValidationError
+ 
+-from mcpdoctor.models import ToolDef
++from ads_preflight.models import ToolDef
+ 
+ 
+ class ToolsFileError(Exception):
+@@ -108,12 +108,12 @@ def _other_format_hint(item: dict[str, Any]) -> str | None:
+     if isinstance(item.get("function"), dict):
+         return (
+             "looks like an OpenAI function definition ('type' and 'function'). "
+-            "mcp-doctor reads MCP tools, where 'name' is at the top level of each tool"
++            "ads-preflight reads MCP tools, where 'name' is at the top level of each tool"
+         )
+     if "functionDeclarations" in item:
+         return (
+             "looks like a Gemini tool ('functionDeclarations'). "
+-            "mcp-doctor reads MCP tools, where each tool has its own 'name'"
++            "ads-preflight reads MCP tools, where each tool has its own 'name'"
+         )
+     return None
+ 
+@@ -135,4 +135,4 @@ def _json_type_name(value: Any) -> str:
+         return "a string"
+     if isinstance(value, list):
+         return "a list"
+-    return "an object"
+\ No newline at end of file
++    return "an object"
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index e5a6c81..15ff48e 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -5,8 +5,8 @@ import typer
+ from typer.main import get_command
+ from typer.testing import CliRunner
+ 
+-import mcpdoctor
+-from mcpdoctor.cli import app
++import ads_preflight
++from ads_preflight.cli import app
+ 
+ runner = CliRunner()
+ 
+@@ -17,8 +17,8 @@ runner = CliRunner()
+ def test_app_is_a_typer_app():
+     """Expose the app that pyproject.toml points to.
+ 
+-    What:     mcpdoctor.cli.app is a Typer app.
+-    Why:      pyproject.toml maps the mcp-doctor command to mcpdoctor.cli:app. If it is
++    What:     ads_preflight.cli.app is a Typer app.
++    Why:      pyproject.toml maps the ads-preflight command to ads_preflight.cli:app. If it is
+               missing or has another type, the installed command breaks.
+     Expected: isinstance(app, typer.Typer)
+     """
+@@ -33,20 +33,20 @@ def test_version_is_known():
+               would also hide the real version in every message that prints it.
+     Expected: __version__ is a non-empty string other than "unknown".
+     """
+-    assert isinstance(mcpdoctor.__version__, str)
+-    assert mcpdoctor.__version__ not in ("", "unknown")
++    assert isinstance(ads_preflight.__version__, str)
++    assert ads_preflight.__version__ not in ("", "unknown")
+ 
+ 
+ def test_version_flag_prints_name_and_version():
+     """Print the version for --version.
+ 
+-    What:     The output is "mcp-doctor <version>" and the exit code is 0.
++    What:     The output is "ads-preflight <version>" and the exit code is 0.
+     Why:      The first thing people run to check the install.
+-    Expected: output == "mcp-doctor " + __version__
++    Expected: output == "ads-preflight " + __version__
+     """
+     result = runner.invoke(app, ["--version"])
+     assert result.exit_code == 0
+-    assert result.output.strip() == f"mcp-doctor {mcpdoctor.__version__}"
++    assert result.output.strip() == f"ads-preflight {ads_preflight.__version__}"
+ 
+ 
+ # --- Help -------------------------------------------------------------------
+diff --git a/tests/test_models.py b/tests/test_models.py
+index f200b8c..47ead5f 100644
+--- a/tests/test_models.py
++++ b/tests/test_models.py
+@@ -10,7 +10,7 @@ import pytest
+ from pydantic import ValidationError
+ from pydantic_core import PydanticSerializationError
+ 
+-from mcpdoctor.models import CallRecord
++from ads_preflight.models import CallRecord
+ 
+ 
+ def make_record(**overrides):
+diff --git a/tests/test_normalize.py b/tests/test_normalize.py
+index 975b226..42e7ec8 100644
+--- a/tests/test_normalize.py
++++ b/tests/test_normalize.py
+@@ -12,8 +12,8 @@ import re
+ 
+ import pytest
+ 
+-from mcpdoctor.models import CallRecord
+-from mcpdoctor.normalize import normalize, parse_path, remove_paths, scrub, sort_lists
++from ads_preflight.models import CallRecord
++from ads_preflight.normalize import normalize, parse_path, remove_paths, scrub, sort_lists
+ 
+ DIGITS = [(re.compile(r"\d+"), "<N>")]
+ 
+diff --git a/tests/test_smoke.py b/tests/test_smoke.py
+index f975d67..40bdef8 100644
+--- a/tests/test_smoke.py
++++ b/tests/test_smoke.py
+@@ -1,14 +1,14 @@
+ """Smoke test: the package installs and imports."""
+ 
+-import mcpdoctor
++import ads_preflight
+ 
+ 
+ def test_package_imports():
+     """Import the package and read its version.
+ 
+-    What:     `import mcpdoctor` works and the package exposes a version string.
++    What:     `import ads_preflight` works and the package exposes a version string.
+     Why:      pytest exits with an error when it collects no tests, and a broken
+               install shows up here first.
+-    Expected: mcpdoctor.__version__ is a str.
++    Expected: ads_preflight.__version__ is a str.
+     """
+-    assert isinstance(mcpdoctor.__version__, str)
++    assert isinstance(ads_preflight.__version__, str)
+diff --git a/tests/test_tooldef.py b/tests/test_tooldef.py
+index 0783f87..5e97342 100644
+--- a/tests/test_tooldef.py
++++ b/tests/test_tooldef.py
+@@ -12,7 +12,7 @@ import pickle
+ import pytest
+ from pydantic import ValidationError
+ 
+-from mcpdoctor.models import ToolAnnotations, ToolDef
++from ads_preflight.models import ToolAnnotations, ToolDef
+ 
+ # A tool as a server typically lists it, with every standard field.
+ FULL_TOOL = {
+@@ -477,4 +477,4 @@ def test_ad_style_tool_with_no_annotations_is_unknown():
+         "managerAccountId",
+         "advertiserAccountId",
+     }
+-    assert tool.declared_access == "unknown"
+\ No newline at end of file
++    assert tool.declared_access == "unknown"
+diff --git a/tests/test_toolsfile.py b/tests/test_tools_file.py
+similarity index 99%
+rename from tests/test_toolsfile.py
+rename to tests/test_tools_file.py
+index 8984126..422078d 100644
+--- a/tests/test_toolsfile.py
++++ b/tests/test_tools_file.py
+@@ -10,8 +10,8 @@ import json
+ 
+ import pytest
+ 
+-from mcpdoctor.models import ToolDef
+-from mcpdoctor.toolsfile import ToolsFileError, load_tools, parse_tools
++from ads_preflight.models import ToolDef
++from ads_preflight.tools_file import ToolsFileError, load_tools, parse_tools
+ 
+ TOOLS = [
+     {"name": "list_notes", "description": "List notes.", "annotations": {"readOnlyHint": True}},
+@@ -530,4 +530,4 @@ def test_other_invalid_json_gets_no_hint(tmp_path):
+         load_tools(path)
+     assert "not valid JSON" in str(error.value)
+     assert "comma" not in str(error.value)
+-    assert "comments" not in str(error.value)
+\ No newline at end of file
++    assert "comments" not in str(error.value)
