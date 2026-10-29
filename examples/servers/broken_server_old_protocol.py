@@ -1,8 +1,11 @@
-"""A hand-written MCP server for tests. It speaks the older protocol, without the SDK.
+"""A hand-written MCP server that can send malformed tool lists. It does not use the SDK.
 
-Usage: python raw_server.py VARIANT. It answers `initialize` and `tools/list` only.
-The SDK's own server refuses to produce malformed tool lists, so broken ones are written
-by hand here. Keep this file free of imports from ads_preflight and from mcp.
+Usage: python broken_server_old_protocol.py VARIANT
+Variants: good, wrong-key (`input_schema` instead of `inputSchema`), no-schema.
+
+It speaks the older protocol and answers `initialize` and `tools/list` only. The SDK's own
+server refuses to produce malformed tool lists, so they are written by hand here. Keep this
+file free of imports from ads_preflight and from mcp.
 """
 
 import json
