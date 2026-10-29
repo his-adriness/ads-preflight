@@ -67,7 +67,7 @@ def main(
 
 @app.command()
 def inspect(server: ServerArg) -> None:
-    """List a server's tools, resources and prompts.
+    """List the tools a server offers.
 
     Example: ads-preflight inspect -- python server.py
     """

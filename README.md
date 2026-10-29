@@ -4,7 +4,7 @@
 
 > Preflight checks for ad-platform MCP servers: lint their tools, test their behaviour, and gate what an AI agent is allowed to do.
 
-**Status:** early development. `lint --tools-file` works on a saved `tools/list` response. `inspect`, `run` and linting a live server print "not implemented yet", because the MCP client is not built. This is an independent project, not affiliated with Amazon or any ad platform.
+**Status:** early development. `lint --tools-file` works on a saved `tools/list` response. The MCP client can start a local server over stdio and list and call its tools, but `inspect`, `run` and linting a live server are not wired to it yet and print "not implemented yet". This is an independent project, not affiliated with Amazon or any ad platform.
 
 ## Why
 
@@ -153,7 +153,8 @@ ads-preflight run tests.yaml -- python server.py
 
 ## Planned
 
-- A mock ads MCP server with synthetic data, and an MCP client with a basic `inspect`
+- `inspect`: list a live server's tools (the client exists, the command is not wired to it yet)
+- A mock ads MCP server with synthetic data
 - `lint` of a live server (works today on a saved tools file)
 - `check`: decide whether one proposed tool call is allowed, needs approval, or is blocked, using a policy file. It reads the call as JSON, so it can run from a Claude Code hook or in CI
 - `run`: execute YAML test files against a server (command exists, logic does not)
@@ -210,7 +211,9 @@ ads-preflight/
 │  ├─ assertions.py   # expectation types (not built yet)
 │  └─ reporters/      # terminal and json reports (junit not built yet)
 ├─ examples/
-│  ├─ servers/        # notes_server.py, a small well-formed server (a broken one is planned)
+│  ├─ servers/        # notes_server.py (well-formed) and broken_server_old_protocol.py
+│  │                  #   (hand-written, can send malformed tool lists)
+│  ├─ tools/          # tools_sample.json, a tools file that triggers most lint rules
 │  └─ tests/          # sample test files (not built yet)
 ├─ tests/             # tests for the tool itself
 └─ .github/workflows/ci.yml
