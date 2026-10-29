@@ -14,7 +14,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from ads_preflight.client import ServerError, ToolNotAllowedError, connect
+from ads_preflight.client import ServerError, ToolNotAllowedError, connect, list_server_tools
 
 SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_server.py"
 NOTES_SERVER = [sys.executable, str(SERVER_FILE)]
@@ -198,3 +198,14 @@ def test_a_malformed_tool_list_is_a_server_error(variant):
         run(main)
     assert "does not follow the MCP protocol" in str(error.value)
     assert "inputSchema" in str(error.value)
+
+
+def test_list_server_tools_starts_lists_and_stops():
+    """List the example server's tools with the one-call helper.
+
+    What:     Four tool names come back.
+    Why:      `lint` and `inspect` use this helper, so it must work on a real process.
+    Expected: The four names of the example server.
+    """
+    tools = run(lambda: list_server_tools(NOTES_SERVER, timeout=20))
+    assert [tool.name for tool in tools] == ["list_notes", "get_note", "add_note", "delete_note"]

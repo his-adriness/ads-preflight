@@ -7,11 +7,16 @@ Each test docstring has three parts:
 """
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from ads_preflight import cli
 from ads_preflight.cli import app
+from ads_preflight.client import ServerError
+from ads_preflight.models import ToolDef
 
 runner = CliRunner()
 
@@ -196,14 +201,112 @@ def test_lint_rejects_a_file_and_a_server_together(tmp_path):
     assert "not both" in result.output
 
 
-@pytest.mark.parametrize("args", [["lint", "--", "python", "server.py"]])
-def test_lint_of_a_live_server_is_still_a_stub(args):
-    """Run lint with a server command only.
+# --- A live server ------------------------------------------------------------------------------
 
-    What:     Exit code 1 and "not implemented yet".
-    Why:      Checking a live server needs the client, which is not built yet.
-    Expected: exit code 1 and "not implemented yet" in the output.
+SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_server.py"
+OLD_SERVER = SERVER_FILE.parent / "broken_server_old_protocol.py"
+
+
+def fake_server(monkeypatch, tools=None, error=None):
+    """Replace the live fetch with canned tools or an error. Returns the calls made."""
+    calls = []
+
+    def fetch(server, timeout):
+        calls.append((list(server), timeout))
+        if error:
+            raise error
+        return [ToolDef.model_validate(tool) for tool in tools or []]
+
+    monkeypatch.setattr(cli, "_fetch_tools", fetch)
+    return calls
+
+
+def test_lint_checks_the_tools_a_server_lists(monkeypatch):
+    """Lint a server command, with the server faked.
+
+    What:     The tools it lists are checked, and the report names the server command.
+    Why:      The live path must give the same findings as the file path.
+    Expected: exit code 1, "core.duplicate-name" and "python server.py" in the output.
     """
-    result = runner.invoke(app, args)
+    calls = fake_server(monkeypatch, HAS_ERROR)
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
     assert result.exit_code == 1
-    assert "not implemented yet" in result.output
+    assert "core.duplicate-name" in result.output
+    assert "python server.py" in result.output
+    assert calls == [(["python", "server.py"], 30.0)]
+
+
+def test_timeout_reaches_the_client(monkeypatch):
+    """Lint with --timeout 5.
+
+    What:     The value is passed on as a number of seconds.
+    Why:      An option that is parsed but not used would silently do nothing.
+    Expected: The fetch was called with 5.0.
+    """
+    calls = fake_server(monkeypatch, [GOOD])
+    result = runner.invoke(app, ["lint", "--timeout", "5", "--", "python", "server.py"])
+    assert result.exit_code == 0
+    assert calls[0][1] == 5.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_timeout_must_be_a_positive_number(value):
+    """Lint with a timeout that makes no sense.
+
+    What:     Exit code 2.
+    Why:      A zero or negative limit would fail every server for the wrong reason.
+    Expected: exit code 2.
+    """
+    result = runner.invoke(app, ["lint", "--timeout", value, "--", "python", "server.py"])
+    assert result.exit_code == 2
+
+
+def test_a_server_that_cannot_be_used_exits_2_with_its_message(monkeypatch):
+    """Lint a server that fails to start, with the client faked.
+
+    What:     Exit code 2, the message shown as written, its stderr lines kept on separate lines.
+    Why:      "The server crashed" must not look like "the tools are fine", and the
+              server's own output helps the developer fix it.
+    Expected: exit code 2, and the two lines of the message on two output lines.
+    """
+    fake_server(monkeypatch, error=ServerError("cannot start the server\n  boom"))
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
+    assert result.exit_code == 2
+    assert "cannot start the server\n  boom" in result.output
+
+
+def test_server_text_cannot_inject_escape_codes(monkeypatch):
+    """Lint a server whose error message carries an escape code.
+
+    What:     The escape character is shown as text.
+    Why:      Server output is untrusted and must not control the terminal.
+    Expected: No escape character in the output.
+    """
+    fake_server(monkeypatch, error=ServerError("bad\x1b[2J"))
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
+    assert "\x1b" not in result.output
+
+
+def test_lint_of_the_example_server_end_to_end():
+    """Lint the real example server in a child process.
+
+    What:     The notes server is started, its 4 tools are checked, and the report prints.
+    Why:      This is the whole path a user takes: command line, client, rules, report.
+    Expected: exit code 0 and "4 tools" in the output.
+    """
+    result = runner.invoke(app, ["lint", "--", sys.executable, str(SERVER_FILE)])
+    assert result.exit_code == 0, result.output
+    assert "4 tools" in result.output
+
+
+def test_lint_of_a_server_with_a_broken_tool_list_exits_2():
+    """Lint the hand-written server whose tool has no inputSchema.
+
+    What:     Exit code 2 and a message about the protocol.
+    Why:      The SDK rejects this reply, so this message is the signal until the raw
+              reply is read directly.
+    Expected: exit code 2 and "does not follow the MCP protocol" in the output.
+    """
+    result = runner.invoke(app, ["lint", "--", sys.executable, str(OLD_SERVER), "no-schema"])
+    assert result.exit_code == 2
+    assert "does not follow the MCP protocol" in result.output

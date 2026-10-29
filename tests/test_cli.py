@@ -111,11 +111,10 @@ def test_command_help_works(command):
     "args",
     [
         ["inspect", "--", "python", "server.py"],
-        ["lint", "--", "python", "server.py"],
         ["run", "tests.yaml", "--", "python", "server.py"],
         ["run", "tests.yaml"],
     ],
-    ids=["inspect", "lint", "run-with-server", "run-without-server"],
+    ids=["inspect", "run-with-server", "run-without-server"],
 )
 def test_stub_commands_fail_loudly(args):
     """Make unfinished commands fail instead of pretending to work.
@@ -164,7 +163,7 @@ def test_arguments_with_spaces_stay_one_argument():
               already split the line, and we must not split it again.
     Expected: The output shows it quoted: python 'my server.py'
     """
-    result = runner.invoke(app, ["lint", "--", "python", "my server.py"])
+    result = runner.invoke(app, ["inspect", "--", "python", "my server.py"])
     assert "python 'my server.py'" in result.output
 
 
