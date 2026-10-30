@@ -12,6 +12,7 @@ Safety: a session cannot call a tool unless its name was passed in `allowed_tool
 """
 
 import math
+import os
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
@@ -31,6 +32,10 @@ from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
 
 STDERR_LINES_SHOWN = 15
+STDERR_TAIL_BYTES = 64 * 1024  # Only this much of the end of the log is ever read.
+STDERR_LINE_CHARS = 300  # Longer lines are cut, so one huge line cannot flood the report.
+STDERR_LIMIT_BYTES = 8 * 1024 * 1024  # A server that writes more than this is stopped.
+_STDERR_POLL_SECONDS = 0.1
 
 # Raw `result` objects of the server's tools/list replies, in the order they arrived.
 RawPages = list[dict[str, Any]]
@@ -237,6 +242,7 @@ async def connect(
     connect_timeout: float = 30.0,
     call_timeout: float = 60.0,
     env: dict[str, str] | None = None,
+    stderr_limit: int = STDERR_LIMIT_BYTES,
     open_client: OpenClient = _open_sdk_client,
 ) -> AsyncIterator[ServerSession]:
     """Start a server and connect to it. The server is stopped when the block ends.
@@ -246,15 +252,19 @@ async def connect(
     `env` adds environment variables for the server; their values are replaced by *** in
     every error message and stderr excerpt. Raises ServerError if the server
     cannot be started or does not finish the handshake within `connect_timeout` seconds.
+    A server that writes more than `stderr_limit` bytes to stderr is stopped, and the
+    block ends with a ServerError that shows the last lines it wrote.
     `open_client` exists so tests can swap in a fake.
     """
     if not command or not command[0]:
         raise ServerError("no server command was given")
     connected = False
+    flood: list[str] = []  # Filled with the last stderr lines if the server writes too much.
     raw_pages: RawPages = []
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
         log_path = Path(folder) / "server-stderr.txt"
-        with open(log_path, "w", encoding="utf-8", errors="replace") as errlog:
+        # Append mode, so the server keeps writing at the end if the file is emptied.
+        with open(log_path, "a", encoding="utf-8", errors="replace") as errlog:
 
             def hide(text: str) -> str:
                 return redact(text, (env or {}).values())
@@ -263,19 +273,22 @@ async def connect(
                 return hide(_read_tail(log_path))
 
             try:
-                deadline = anyio.current_time() + connect_timeout
-                with anyio.CancelScope(deadline=deadline) as guard:
-                    async with open_client(command, env, errlog, raw_pages) as client:
-                        guard.deadline = math.inf  # The time limit is for connecting only.
-                        connected = True
-                        yield ServerSession(
-                            client,
-                            allowed_tools=allowed_tools,
-                            call_timeout=call_timeout,
-                            stderr_tail=stderr_tail,
-                            raw_pages=raw_pages,
-                            hide=hide,
-                        )
+                async with anyio.create_task_group() as watchers:
+                    deadline = anyio.current_time() + connect_timeout
+                    with anyio.CancelScope(deadline=deadline) as guard:
+                        watchers.start_soon(_watch_stderr, log_path, stderr_limit, guard, flood)
+                        async with open_client(command, env, errlog, raw_pages) as client:
+                            guard.deadline = math.inf  # The time limit is for connecting only.
+                            connected = True
+                            yield ServerSession(
+                                client,
+                                allowed_tools=allowed_tools,
+                                call_timeout=call_timeout,
+                                stderr_tail=stderr_tail,
+                                raw_pages=raw_pages,
+                                hide=hide,
+                            )
+                    watchers.cancel_scope.cancel()  # The server is stopped: stop watching.
             except Exception as error:
                 leaves = _leaf_errors(error)
                 if connected:
@@ -286,9 +299,46 @@ async def connect(
                     raise
                 problem = _startup_error(command, leaves, stderr_tail())
                 raise ServerError(hide(str(problem))) from error
+            if flood:
+                message = f"the server wrote more than {_format_size(stderr_limit)} to stderr"
+                raise ServerError(hide(_with_stderr(message, flood[0])))
             if guard.cancelled_caught and not connected:
                 message = f"the server did not finish starting within {connect_timeout:g} seconds"
                 raise ServerError(hide(_with_stderr(message, stderr_tail())))
+
+
+async def _watch_stderr(
+    log_path: Path, limit: int, guard: anyio.CancelScope, flood: list[str]
+) -> None:
+    """Stop the run if the server's stderr log grows past `limit` bytes.
+
+    The server writes to the file directly, so its size cannot be capped. This notes the
+    last lines, cancels the run, and then keeps emptying the file while the server is
+    being stopped, so a fast writer cannot fill the disk in the meantime.
+    """
+    while True:
+        await anyio.sleep(_STDERR_POLL_SECONDS)
+        try:
+            size = log_path.stat().st_size
+        except OSError:
+            continue
+        if flood:
+            _empty(log_path)
+        elif size > limit:
+            flood.append(_read_tail(log_path))
+            guard.cancel()
+
+
+def _empty(log_path: Path) -> None:
+    try:
+        os.truncate(log_path, 0)
+    except OSError:
+        pass  # Some systems do not allow emptying a file another process has open.
+
+
+def _format_size(size: int) -> str:
+    megabytes = size / (1024 * 1024)
+    return f"{megabytes:g} MB" if megabytes >= 1 else f"{size} bytes"
 
 
 def _parse_raw_tools(raw: dict[str, Any]) -> list[ToolDef]:
@@ -326,12 +376,29 @@ def _startup_error(command: Sequence[str], leaves: list[BaseException], tail: st
 
 
 def _read_tail(log_path: Path) -> str:
-    """The last lines the server wrote to stderr, or "" if there are none."""
+    """The last lines the server wrote to stderr, or "" if there are none.
+
+    Reads only the end of the file, so a huge log costs no more than a small one.
+    """
     try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
+        with open(log_path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            size = log.tell()
+            log.seek(max(0, size - STDERR_TAIL_BYTES))
+            data = log.read(STDERR_TAIL_BYTES)
     except OSError:
         return ""
-    return "\n".join(text.strip().splitlines()[-STDERR_LINES_SHOWN:])
+    lines = data.decode("utf-8", errors="replace").strip().splitlines()
+    if size > STDERR_TAIL_BYTES and len(lines) > 1:
+        lines = lines[1:]  # The first line was probably cut in the middle.
+    lines = [_shorten(line) for line in lines[-STDERR_LINES_SHOWN:]]
+    return "\n".join(lines)
+
+
+def _shorten(line: str) -> str:
+    if len(line) <= STDERR_LINE_CHARS:
+        return line
+    return line[: STDERR_LINE_CHARS - 3] + "..."
 
 
 def _with_stderr(message: str, tail: str) -> str:
