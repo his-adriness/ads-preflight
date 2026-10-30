@@ -11,6 +11,7 @@ Safety: a session cannot call a tool unless its name was passed in `allowed_tool
 `inspect` and `lint` pass nothing, so they cannot call tools at all.
 """
 
+import logging
 import math
 import os
 import tempfile
@@ -25,11 +26,19 @@ import anyio
 from mcp import Client, StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
+from mcp.types import CONNECTION_CLOSED
 from pydantic import ValidationError
 
 from ads_preflight.env import redact
 from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
+
+# The SDK logs a full traceback for every line a server prints that is not an MCP message.
+# With no handler, Python prints those to the terminal. We report such lines ourselves.
+logging.getLogger("mcp").addHandler(logging.NullHandler())
+
+STRAY_LINES_KEPT = 3  # How many non-MCP stdout lines are remembered.
+STRAY_LINE_CHARS = 200
 
 STDERR_LINES_SHOWN = 15
 STDERR_TAIL_BYTES = 64 * 1024  # Only this much of the end of the log is ever read.
@@ -37,8 +46,16 @@ STDERR_LINE_CHARS = 300  # Longer lines are cut, so one huge line cannot flood t
 STDERR_LIMIT_BYTES = 8 * 1024 * 1024  # A server that writes more than this is stopped.
 _STDERR_POLL_SECONDS = 0.1
 
-# Raw `result` objects of the server's tools/list replies, in the order they arrived.
-RawPages = list[dict[str, Any]]
+class RawPages(list[dict[str, Any]]):
+    """Raw `result` objects of the server's tools/list replies, in the order they arrived.
+
+    `stray` holds the first few stdout lines that were not MCP messages, such as a log line
+    the server printed to stdout by mistake.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stray: list[str] = []
 
 # Opens the SDK client for a server command and copies raw tools/list replies into the
 # list it is given. Tests replace it with a fake.
@@ -77,6 +94,10 @@ class _RecordingStream:
             result = getattr(item.message, "result", None)
             if isinstance(result, dict) and isinstance(result.get("tools"), list):
                 self._raw_pages.append(result)
+        elif isinstance(item, Exception):
+            stray = getattr(self._raw_pages, "stray", None)
+            if stray is not None and len(stray) < STRAY_LINES_KEPT:
+                stray.append(_stray_text(item))
         return item
 
     async def receive(self) -> Any:
@@ -105,6 +126,16 @@ class _RecordingStream:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)  # such as `last_context`, which the SDK may read
+
+
+def _stray_text(problem: Exception) -> str:
+    """The line the SDK could not read as an MCP message, cut to a readable length."""
+    text = str(problem)
+    if isinstance(problem, ValidationError):
+        errors = problem.errors()
+        if errors and isinstance(errors[0].get("input"), str):
+            text = errors[0]["input"]
+    return text if len(text) <= STRAY_LINE_CHARS else text[: STRAY_LINE_CHARS - 3] + "..."
 
 
 def _open_sdk_client(
@@ -207,6 +238,16 @@ class ServerSession:
             latency_ms=latency_ms,
         )
 
+    def _stray_note(self) -> str:
+        """A line about text the server printed to stdout by mistake, or ""."""
+        stray = getattr(self._raw_pages, "stray", None)
+        if not stray:
+            return ""
+        return (
+            f"\nthe server also printed text on stdout that is not an MCP message: {stray[0]!r}"
+            "\n(a server must write logs to stderr; stdout is only for MCP messages)"
+        )
+
     async def _request(
         self, method: Callable[..., Awaitable[Any]], action: str, *args: Any, **kwargs: Any
     ) -> Any:
@@ -216,6 +257,7 @@ class ServerSession:
                 return await method(*args, **kwargs)
         except TimeoutError:
             message = f"no answer within {self._call_timeout:g} seconds while trying to {action}"
+            message += self._stray_note()
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from None
         except ValidationError as error:
             # The SDK checks every reply against the protocol and rejects one that does not fit.
@@ -227,10 +269,15 @@ class ServerSession:
             )
             raise _ReplyRejected(self._hide(message)) from error
         except MCPError as error:
-            message = f"the server returned an error while trying to {action}: {error}"
+            if error.error.code == CONNECTION_CLOSED:
+                message = f"the server closed the connection while trying to {action}"
+                message += self._stray_note()
+            else:
+                message = f"the server returned an error while trying to {action}: {error}"
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.EndOfStream) as error:
             message = f"the server closed the connection while trying to {action}"
+            message += self._stray_note()
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
 
 
@@ -260,7 +307,7 @@ async def connect(
         raise ServerError("no server command was given")
     connected = False
     flood: list[str] = []  # Filled with the last stderr lines if the server writes too much.
-    raw_pages: RawPages = []
+    raw_pages = RawPages()
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
         log_path = Path(folder) / "server-stderr.txt"
         # Append mode, so the server keeps writing at the end if the file is emptied.

@@ -306,3 +306,105 @@ def test_a_chatty_server_below_the_limit_works():
     command = [sys.executable, str(MISBEHAVING_SERVER), "chatty"]
     tools = run(lambda: list_server_tools(command, timeout=20))
     assert [tool.name for tool in tools] == ["ok"]
+
+
+# --- Servers that stop, print the wrong thing or ignore shutdown -------------------------------
+
+SLOW_STOP_SECONDS = 20  # Stopping a server that ignores the stop signal takes several seconds.
+
+
+def misbehaving(mode, heartbeat=None):
+    command = [sys.executable, str(MISBEHAVING_SERVER), mode]
+    return command + [str(heartbeat)] if heartbeat else command
+
+
+def has_stopped(heartbeat: Path) -> bool:
+    """True if the server's heartbeat file stops changing, which means the process is gone."""
+    for _ in range(50):  # The server may be rewriting the file at this moment.
+        first = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
+        if first:
+            break
+        time.sleep(0.05)
+    assert first, "the server never wrote a heartbeat"
+    time.sleep(0.6)
+    return heartbeat.read_text(encoding="utf-8") == first
+
+
+@pytest.mark.parametrize("mode", ["exit-after-handshake", "half-line"])
+def test_a_server_that_stops_mid_request_is_reported_as_closing_the_connection(mode):
+    """Ask for the tools of a server that exits instead of answering.
+
+    What:     A ServerError that says the server closed the connection.
+    Why:      "The server returned an error" would be wrong, and a stack trace unhelpful.
+    Expected: ServerError with "closed the connection while trying to list tools".
+    """
+
+    async def main():
+        async with connect(misbehaving(mode), call_timeout=10) as session:
+            await session.list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "closed the connection while trying to list tools" in str(error.value)
+
+
+def test_text_printed_on_stdout_is_named_when_the_server_then_hangs():
+    """Ask for the tools of a server that prints a log line to stdout and never answers.
+
+    What:     The time-out error quotes the log line and says logs belong on stderr.
+    Why:      A time-out alone does not tell a developer that the stdout line is the clue.
+    Expected: ServerError with "no answer within", the log line and "stderr".
+    """
+
+    async def main():
+        async with connect(misbehaving("stdout-noise-hang"), call_timeout=2) as session:
+            await session.list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "no answer within 2 seconds" in str(error.value)
+    assert "server v1.0 listening on stdio" in str(error.value)
+    assert "stderr" in str(error.value)
+
+
+def test_a_server_that_never_answers_times_out_and_is_stopped(tmp_path):
+    """Ask for the tools of a server that never answers and ignores the stop signal.
+
+    What:     A time-out error, in bounded time, and the server process is gone afterwards.
+    Why:      A hung server must never leave a process running after the command ends.
+    Expected: ServerError with "no answer within 2 seconds", under 20 seconds in all, and a
+              heartbeat that has stopped.
+    """
+    heartbeat = tmp_path / "heartbeat.txt"
+
+    async def main():
+        async with connect(misbehaving("hang-on-tools", heartbeat), call_timeout=2) as session:
+            await session.list_tools()
+
+    start = time.perf_counter()
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert time.perf_counter() - start < SLOW_STOP_SECONDS
+    assert "no answer within 2 seconds" in str(error.value)
+    assert has_stopped(heartbeat)
+
+
+def test_a_server_that_ignores_shutdown_is_still_stopped(tmp_path):
+    """Use a server that works, then keeps running after its input is closed.
+
+    What:     The tools are listed, leaving the block takes bounded time, and the process is
+              gone afterwards.
+    Why:      Servers that do not exit when asked are common, and must not pile up.
+    Expected: One tool, under 20 seconds in all, and a heartbeat that has stopped.
+    """
+    heartbeat = tmp_path / "heartbeat.txt"
+
+    async def main():
+        async with connect(misbehaving("ignore-shutdown", heartbeat)) as session:
+            return await session.list_tools()
+
+    start = time.perf_counter()
+    tools = run(main)
+    assert time.perf_counter() - start < SLOW_STOP_SECONDS
+    assert [tool.name for tool in tools] == ["ok"]
+    assert has_stopped(heartbeat)
