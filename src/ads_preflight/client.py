@@ -1,4 +1,4 @@
-"""Talk to a live MCP server over stdio, and hand back ads-preflight's own types.
+"""Talk to a live MCP server over stdio or HTTP, and hand back ads-preflight's own types.
 
 This is the only module that imports the MCP SDK's client, so a change in the SDK
 only has to be fixed here. Everything else works on `ToolDef` and `CallRecord`.
@@ -18,12 +18,15 @@ import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, TextIO
 
 import anyio
+import httpx2
 from mcp import Client, StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 from mcp.types import CONNECTION_CLOSED
@@ -32,6 +35,7 @@ from pydantic import ValidationError
 from ads_preflight.env import redact
 from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
+from ads_preflight.urls import display_url, host_and_port
 
 # The SDK logs a full traceback for every line a server prints that is not an MCP message.
 # With no handler, Python prints those to the terminal. We report such lines ourselves.
@@ -62,6 +66,19 @@ class RawPages(list[dict[str, Any]]):
 OpenClient = Callable[
     [Sequence[str], dict[str, str] | None, TextIO, RawPages], AbstractAsyncContextManager
 ]
+
+
+# Opens the SDK client for a server URL. It is given the connect time limit, the list the
+# recording stream fills, and a list that receives the status code of every HTTP error
+# response. Tests replace it with a fake.
+HttpOpenClient = Callable[[str, float, RawPages, list[int]], AbstractAsyncContextManager]
+
+
+@dataclass(frozen=True)
+class HttpTarget:
+    """A server that is already running and is reached over HTTP."""
+
+    url: str
 
 
 class ServerError(Exception):
@@ -163,9 +180,11 @@ class ServerSession:
         stderr_tail: Callable[[], str] = lambda: "",
         raw_pages: RawPages | None = None,
         hide: Callable[[str], str] = lambda text: text,
+        statuses: list[int] | None = None,
     ):
         self._client = client
         self._hide = hide
+        self._statuses = statuses if statuses is not None else []
         self._raw_pages = raw_pages if raw_pages is not None else []
         self._allowed = frozenset(allowed_tools)
         self._call_timeout = call_timeout
@@ -238,15 +257,19 @@ class ServerSession:
             latency_ms=latency_ms,
         )
 
-    def _stray_note(self) -> str:
-        """A line about text the server printed to stdout by mistake, or ""."""
+    def _note(self) -> str:
+        """Extra lines for an error: text printed on stdout by mistake, or an HTTP status."""
+        note = ""
         stray = getattr(self._raw_pages, "stray", None)
-        if not stray:
-            return ""
-        return (
-            f"\nthe server also printed text on stdout that is not an MCP message: {stray[0]!r}"
-            "\n(a server must write logs to stderr; stdout is only for MCP messages)"
-        )
+        if stray:
+            note += (
+                f"\nthe server also printed text on stdout that is not an MCP message: "
+                f"{stray[0]!r}\n(a server must write logs to stderr; stdout is only for "
+                "MCP messages)"
+            )
+        if self._statuses:
+            note += f"\nthe server answered HTTP {self._statuses[-1]}"
+        return note
 
     async def _request(
         self, method: Callable[..., Awaitable[Any]], action: str, *args: Any, **kwargs: Any
@@ -257,7 +280,7 @@ class ServerSession:
                 return await method(*args, **kwargs)
         except TimeoutError:
             message = f"no answer within {self._call_timeout:g} seconds while trying to {action}"
-            message += self._stray_note()
+            message += self._note()
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from None
         except ValidationError as error:
             # The SDK checks every reply against the protocol and rejects one that does not fit.
@@ -271,13 +294,13 @@ class ServerSession:
         except MCPError as error:
             if error.error.code == CONNECTION_CLOSED:
                 message = f"the server closed the connection while trying to {action}"
-                message += self._stray_note()
+                message += self._note()
             else:
                 message = f"the server returned an error while trying to {action}: {error}"
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.EndOfStream) as error:
             message = f"the server closed the connection while trying to {action}"
-            message += self._stray_note()
+            message += self._note()
             raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
 
 
@@ -388,6 +411,88 @@ def _format_size(size: int) -> str:
     return f"{megabytes:g} MB" if megabytes >= 1 else f"{size} bytes"
 
 
+def _open_http_client(
+    url: str, connect_timeout: float, raw_pages: RawPages, statuses: list[int]
+) -> AbstractAsyncContextManager:
+    async def record(response: httpx2.Response) -> None:
+        if response.status_code >= 400:
+            statuses.append(response.status_code)
+
+    @asynccontextmanager
+    async def transport() -> AsyncIterator[Any]:
+        timeout = httpx2.Timeout(connect_timeout, read=300.0)  # A reply may arrive as a stream.
+        async with httpx2.AsyncClient(timeout=timeout, event_hooks={"response": [record]}) as http:
+            async with streamable_http_client(url, http_client=http) as (read_stream, write_stream):
+                yield _RecordingStream(read_stream, raw_pages), write_stream
+
+    return Client(transport())
+
+
+@asynccontextmanager
+async def connect_http(
+    url: str,
+    *,
+    connect_timeout: float = 30.0,
+    call_timeout: float = 60.0,
+    open_client: HttpOpenClient = _open_http_client,
+) -> AsyncIterator[ServerSession]:
+    """Connect to a server that is already running at `url`. No tool can be called.
+
+    The caller checks the URL first (see `urls.check_url`). Raises ServerError if the
+    server cannot be reached, answers with an HTTP error, or does not finish the
+    handshake within `connect_timeout` seconds.
+    """
+    connected = False
+    raw_pages = RawPages()
+    statuses: list[int] = []
+    try:
+        with anyio.CancelScope(deadline=anyio.current_time() + connect_timeout) as guard:
+            async with open_client(url, connect_timeout, raw_pages, statuses) as client:
+                guard.deadline = math.inf  # The time limit is for connecting only.
+                connected = True
+                yield ServerSession(
+                    client, call_timeout=call_timeout, raw_pages=raw_pages, statuses=statuses
+                )
+    except Exception as error:
+        leaves = _leaf_errors(error)
+        if connected:
+            if len(leaves) == 1 and leaves[0] is not error:
+                raise leaves[0] from None
+            raise
+        raise _http_startup_error(url, leaves, statuses) from error
+    if guard.cancelled_caught and not connected:
+        raise ServerError(
+            f"{display_url(url)} did not finish the handshake within {connect_timeout:g} seconds"
+        )
+
+
+def _http_startup_error(url: str, leaves: list[BaseException], statuses: list[int]) -> ServerError:
+    """Describe why an HTTP server could not be reached or did not answer the handshake."""
+    shown = display_url(url)
+    if statuses:
+        code = statuses[0]
+        if code in (401, 403):
+            return ServerError(
+                f"the server at {shown} refused the request (HTTP {code}): it probably needs "
+                "credentials"
+            )
+        if code == 404:
+            return ServerError(
+                f"no MCP server found at {shown} (HTTP 404): check the URL and its path"
+            )
+        if code >= 500:
+            return ServerError(f"the server at {shown} failed (HTTP {code}) while connecting")
+        return ServerError(f"the server at {shown} answered HTTP {code} while connecting")
+    for leaf in leaves:
+        if isinstance(leaf, httpx2.TimeoutException):
+            return ServerError(f"no answer from {shown} in time while connecting")
+        if isinstance(leaf, httpx2.TransportError):
+            reason = str(leaf) or type(leaf).__name__
+            return ServerError(f"cannot connect to {host_and_port(url)}: {reason}")
+    reason = "; ".join(str(leaf) or type(leaf).__name__ for leaf in leaves)
+    return ServerError(f"the server at {shown} did not complete the MCP handshake: {reason}")
+
+
 def _parse_raw_tools(raw: dict[str, Any]) -> list[ToolDef]:
     """Read tools from a raw reply as leniently as `--tools-file` does."""
     try:
@@ -456,30 +561,55 @@ def _with_stderr(message: str, tail: str) -> str:
 
 
 async def inspect_server(
-    command: Sequence[str],
+    target: Sequence[str] | HttpTarget,
     *,
     timeout: float = 30.0,
     env: dict[str, str] | None = None,
     open_client: OpenClient = _open_sdk_client,
+    open_http_client: HttpOpenClient = _open_http_client,
 ) -> tuple[ServerInfo, list[ToolDef]]:
-    """Start a server, read how it identifies itself and its tools, and stop it.
+    """Connect to a server, read how it identifies itself and its tools, and stop using it.
 
-    No tool is ever called. `timeout` limits the handshake and each request, in seconds.
-    `env` adds environment variables for the server. Raises ServerError.
+    `target` is a command to start (a list), or an `HttpTarget` for a server that is already
+    running. No tool is ever called. `timeout` limits the handshake and each request, in
+    seconds. `env` adds environment variables for a command and cannot be used with a URL.
+    Raises ServerError.
     """
-    async with connect(
-        command, connect_timeout=timeout, call_timeout=timeout, env=env, open_client=open_client
-    ) as session:
+    if isinstance(target, HttpTarget):
+        if env:
+            raise ServerError("environment variables can only be passed to a server we start")
+        connection = connect_http(
+            target.url,
+            connect_timeout=timeout,
+            call_timeout=timeout,
+            open_client=open_http_client,
+        )
+    else:
+        connection = connect(
+            target,
+            connect_timeout=timeout,
+            call_timeout=timeout,
+            env=env,
+            open_client=open_client,
+        )
+    async with connection as session:
         return session.info, await session.list_tools()
 
 
 async def list_server_tools(
-    command: Sequence[str],
+    target: Sequence[str] | HttpTarget,
     *,
     timeout: float = 30.0,
     env: dict[str, str] | None = None,
     open_client: OpenClient = _open_sdk_client,
+    open_http_client: HttpOpenClient = _open_http_client,
 ) -> list[ToolDef]:
-    """Start a server, list its tools and stop it. No tool is ever called."""
-    _, tools = await inspect_server(command, timeout=timeout, env=env, open_client=open_client)
+    """Connect to a server, list its tools and stop using it. No tool is ever called."""
+    _, tools = await inspect_server(
+        target,
+        timeout=timeout,
+        env=env,
+        open_client=open_client,
+        open_http_client=open_http_client,
+    )
     return tools

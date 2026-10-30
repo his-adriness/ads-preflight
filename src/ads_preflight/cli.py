@@ -14,13 +14,14 @@ import anyio
 import typer
 
 from ads_preflight import __version__, linter
-from ads_preflight.client import ServerError, inspect_server, list_server_tools
+from ads_preflight.client import HttpTarget, ServerError, inspect_server, list_server_tools
 from ads_preflight.env import EnvError, resolve_env
 from ads_preflight.models import ServerInfo, ToolDef
 from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
 from ads_preflight.reporters.json_reporter import render_json
 from ads_preflight.reporters.terminal import clean_text, render_terminal
 from ads_preflight.tools_file import ToolsFileError, load_tools
+from ads_preflight.urls import UrlError, check_url, display_url
 
 app = typer.Typer(
     name="ads-preflight",
@@ -30,7 +31,7 @@ app = typer.Typer(
 )
 
 ServerArg = Annotated[
-    list[str],
+    list[str] | None,
     typer.Argument(
         help="The command that starts the MCP server, written after a double dash.",
     ),
@@ -113,23 +114,54 @@ def _server_env(command: str, names: list[str] | None) -> dict[str, str] | None:
         _usage_error(command, str(error))
 
 
+UrlOption = Annotated[
+    str | None,
+    typer.Option(
+        "--url",
+        help="URL of a server that is already running, such as https://host/mcp. "
+        "Use https; http is accepted for localhost only.",
+    ),
+]
+
+
 def _fetch_tools(
-    server: Sequence[str], timeout: float, env: dict[str, str] | None
+    target: Sequence[str] | HttpTarget, timeout: float, env: dict[str, str] | None
 ) -> list[ToolDef]:
     """List a live server's tools. Tests replace this function."""
-    return anyio.run(lambda: list_server_tools(server, timeout=timeout, env=env))
+    return anyio.run(lambda: list_server_tools(target, timeout=timeout, env=env))
 
 
 def _fetch_inspection(
-    server: Sequence[str], timeout: float, env: dict[str, str] | None
+    target: Sequence[str] | HttpTarget, timeout: float, env: dict[str, str] | None
 ) -> tuple[ServerInfo, list[ToolDef]]:
     """Read a live server's identity and tools. Tests replace this function."""
-    return anyio.run(lambda: inspect_server(server, timeout=timeout, env=env))
+    return anyio.run(lambda: inspect_server(target, timeout=timeout, env=env))
+
+
+def _live_target(
+    command: str, server: list[str] | None, url: str | None, env_names: list[str] | None
+) -> tuple[Sequence[str] | HttpTarget, str, dict[str, str] | None]:
+    """Work out which live server was asked for: what to connect to, its name for reports
+    and the variables to pass. Stops with exit code 2 if the options do not fit together."""
+    if server and url:
+        _usage_error(command, "give either a server command after -- or --url, not both")
+    if url is not None:
+        if env_names:
+            _usage_error(command, "--env only applies to a server started from a command")
+        try:
+            checked = check_url(url)
+        except UrlError as error:
+            _usage_error(command, str(error))
+        return HttpTarget(checked), display_url(checked), None
+    if not server:
+        _usage_error(command, "give a server command after -- or a server with --url URL")
+    return server, shlex.join(server), _server_env(command, env_names)
 
 
 @app.command()
 def inspect(
-    server: ServerArg,
+    server: ServerArg = None,
+    url: UrlOption = None,
     output_format: FormatOption = OutputFormat.terminal,
     timeout: TimeoutOption = 30.0,
     env: EnvOption = None,
@@ -140,17 +172,18 @@ def inspect(
 
     Exit code 0: the server answered. 2: the server could not be used. 130: interrupted.
 
-    Example: ads-preflight inspect -- python server.py
+    Examples: ads-preflight inspect -- python server.py
+              ads-preflight inspect --url https://example.com/mcp
     """
-    server_env = _server_env("inspect", env)
+    target, source, server_env = _live_target("inspect", server, url, env)
     try:
-        info, tools = _fetch_inspection(server, timeout, server_env)
+        info, tools = _fetch_inspection(target, timeout, server_env)
     except ServerError as error:
         _usage_error("inspect", str(error))
     except KeyboardInterrupt:
         _interrupted("inspect")
     if output_format is OutputFormat.json:
-        typer.echo(render_inspect_json(shlex.join(server), info, tools))
+        typer.echo(render_inspect_json(source, info, tools))
     else:
         typer.echo(render_inspect_terminal(info, tools))
 
@@ -180,6 +213,7 @@ def lint(
         Path | None,
         typer.Option("--tools-file", help="A saved tools/list response (JSON) to check."),
     ] = None,
+    url: UrlOption = None,
     output_format: FormatOption = OutputFormat.terminal,
     strict: Annotated[bool, typer.Option("--strict", help="Also fail on warnings.")] = False,
     timeout: TimeoutOption = 30.0,
@@ -196,21 +230,24 @@ def lint(
     Examples: ads-preflight lint --tools-file tools.json
               ads-preflight lint -- python server.py
               ads-preflight lint --env API_TOKEN -- python server.py
+              ads-preflight lint --url https://example.com/mcp
     """
-    if tools_file is None and not server:
-        _usage_error("lint", "give --tools-file FILE or a server command after --")
-    if tools_file is not None and server:
-        _usage_error("lint", "give either --tools-file or a server command, not both")
+    if tools_file is None and not server and url is None:
+        _usage_error("lint", "give --tools-file FILE, a server command after --, or --url URL")
+    if tools_file is not None and (server or url is not None):
+        _usage_error("lint", "give only one of --tools-file, a server command and --url")
     if tools_file is not None and env:
         _usage_error("lint", "--env only applies when checking a live server")
-    server_env = _server_env("lint", env)
+    target: Sequence[str] | HttpTarget = []
+    server_env = None
+    source = str(tools_file)
+    if tools_file is None:
+        target, source, server_env = _live_target("lint", server, url, env)
     try:
         if tools_file is not None:
-            source = str(tools_file)
             tools = load_tools(tools_file)
         else:
-            source = shlex.join(server or [])
-            tools = _fetch_tools(server or [], timeout, server_env)
+            tools = _fetch_tools(target, timeout, server_env)
     except (ToolsFileError, ServerError) as error:
         _usage_error("lint", str(error))
     except KeyboardInterrupt:

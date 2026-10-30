@@ -203,11 +203,11 @@ def test_inspect_requires_a_server(args):
 
     What:     Without a server, the command is a usage error.
     Why:      inspect has nothing to do without a server to talk to.
-    Expected: exit code 2 and "Missing argument" in the output.
+    Expected: exit code 2 and "--url" in the output, which names the other way to give one.
     """
     result = runner.invoke(app, args)
     assert result.exit_code == 2
-    assert "Missing argument" in result.output
+    assert "--url" in result.output
 
 
 def test_run_requires_a_test_file():
