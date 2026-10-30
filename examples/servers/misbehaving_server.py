@@ -11,10 +11,11 @@ Modes:
   hang-on-tools       never answers the tools request and ignores the stop signal
   ignore-shutdown     works normally, then keeps running after its input is closed
 
-With HEARTBEAT_FILE, the server rewrites that file with the time every 0.1 seconds, so a
-test can check that the process is really gone. Anything that waits or floods stops by
-itself after a minute, so a bug in a test cannot leave a process running. It speaks the
-older protocol. Keep this file free of imports from ads_preflight and mcp.
+With HEARTBEAT_FILE, the server adds a line to that file every 0.1 seconds, so a test can
+check that the process is really gone by seeing that the file stops growing. Anything that
+waits or floods stops by itself after a minute, so a bug in a test cannot leave a process
+running. It speaks the older protocol. Keep this file free of imports from ads_preflight and
+mcp.
 """
 
 import json
@@ -48,8 +49,10 @@ def flood() -> None:
 def start_heartbeat(path: str) -> None:
     def beat() -> None:
         while True:
-            with open(path, "w", encoding="utf-8") as heartbeat:
-                heartbeat.write(str(time.time()))
+            # Append, never rewrite: a rewrite empties the file first, and a process that is
+            # killed at that moment would leave it empty.
+            with open(path, "a", encoding="utf-8") as heartbeat:
+                heartbeat.write(".\n")
             time.sleep(0.1)
 
     threading.Thread(target=beat, daemon=True).start()

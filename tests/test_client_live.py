@@ -319,15 +319,15 @@ def misbehaving(mode, heartbeat=None):
 
 
 def has_stopped(heartbeat: Path) -> bool:
-    """True if the server's heartbeat file stops changing, which means the process is gone."""
-    for _ in range(50):  # The server may be rewriting the file at this moment.
-        first = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
-        if first:
+    """True if the server's heartbeat file stops growing, which means the process is gone."""
+    for _ in range(100):  # The server may not have written its first beat yet.
+        size = heartbeat.stat().st_size if heartbeat.exists() else 0
+        if size:
             break
         time.sleep(0.05)
-    assert first, "the server never wrote a heartbeat"
+    assert size, "the server never wrote a heartbeat"
     time.sleep(0.6)
-    return heartbeat.read_text(encoding="utf-8") == first
+    return heartbeat.stat().st_size == size
 
 
 @pytest.mark.parametrize("mode", ["exit-after-handshake", "half-line"])
