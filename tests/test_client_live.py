@@ -9,6 +9,7 @@ Each test docstring has three parts:
 """
 
 import sys
+import time
 from pathlib import Path
 
 import anyio
@@ -26,6 +27,7 @@ SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_ser
 NOTES_SERVER = [sys.executable, str(SERVER_FILE)]
 RAW_SERVER = SERVER_FILE.parent / "broken_server_old_protocol.py"
 PROBE_SERVER = SERVER_FILE.parent / "env_probe_server.py"
+MISBEHAVING_SERVER = SERVER_FILE.parent / "misbehaving_server.py"
 
 
 def run(coroutine_function):
@@ -267,3 +269,40 @@ def test_a_secret_a_crashing_server_prints_is_hidden():
         run(main)
     assert "PROBE_VAR=***" in str(error.value)
     assert "value1234" not in str(error.value)
+
+
+@pytest.mark.parametrize("mode", ["flood-at-start", "flood-stderr"])
+def test_a_server_that_floods_stderr_is_stopped_with_its_last_lines(mode):
+    """Run a server that writes to stderr as fast as it can.
+
+    What:     A ServerError that gives the limit and the end of the log, soon after the limit
+              is passed. The server is stopped.
+    Why:      Without a limit this server writes about a gigabyte every second, and reading
+              its log once made the process run out of memory.
+    Expected: ServerError with "more than 200000 bytes" and "flood line", well before the
+              server's own 30-second stop.
+    """
+    command = [sys.executable, str(MISBEHAVING_SERVER), mode]
+
+    async def main():
+        async with connect(command, stderr_limit=200_000, connect_timeout=20, call_timeout=20) as s:
+            await s.list_tools()
+
+    start = time.perf_counter()
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert time.perf_counter() - start < 20
+    assert "more than 200000 bytes" in str(error.value)
+    assert "flood line" in str(error.value)
+
+
+def test_a_chatty_server_below_the_limit_works():
+    """Run a server that writes 100 log lines to stderr and then works normally.
+
+    What:     The tools are listed.
+    Why:      Ordinary logging is common and must not be treated as a flood.
+    Expected: One tool named "ok".
+    """
+    command = [sys.executable, str(MISBEHAVING_SERVER), "chatty"]
+    tools = run(lambda: list_server_tools(command, timeout=20))
+    assert [tool.name for tool in tools] == ["ok"]

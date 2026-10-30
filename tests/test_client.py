@@ -6,6 +6,7 @@ Each test docstring has three parts:
   Expected: the output that counts as a pass
 """
 
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -20,6 +21,8 @@ from ads_preflight.client import (
     ServerError,
     ServerSession,
     ToolNotAllowedError,
+    _format_size,
+    _read_tail,
     _RecordingStream,
     connect,
     inspect_server,
@@ -864,3 +867,171 @@ def test_a_server_error_message_cannot_leak_a_secret():
     with pytest.raises(ServerError) as error:
         run(main)
     assert "abcd1234" not in str(error.value)
+
+
+# --- Reading and limiting the server's stderr --------------------------------------------------
+
+
+def test_read_tail_of_a_missing_file_is_empty(tmp_path):
+    """Read the stderr log when the file does not exist.
+
+    What:     An empty string, no error.
+    Why:      Error reporting must never fail because of the log.
+    Expected: "".
+    """
+    assert _read_tail(tmp_path / "nothing.txt") == ""
+
+
+def test_read_tail_keeps_only_the_last_lines(tmp_path):
+    """Read a log of 30 lines.
+
+    What:     The last 15 lines, in order.
+    Why:      The end of the log is where the reason for a failure is.
+    Expected: line 15 to line 29.
+    """
+    path = tmp_path / "log.txt"
+    path.write_text("".join(f"line {n}\n" for n in range(30)), encoding="utf-8")
+    lines = _read_tail(path).splitlines()
+    assert lines[0] == "line 15"
+    assert lines[-1] == "line 29"
+    assert len(lines) == 15
+
+
+def test_read_tail_of_a_huge_log_reads_only_the_end(tmp_path):
+    """Read a log of about 3 MB.
+
+    What:     The last 15 lines, found without reading the whole file.
+    Why:      A noisy server once made the process run out of memory by reading all of it.
+    Expected: line 299985 to line 299999, and nothing from the start.
+    """
+    path = tmp_path / "log.txt"
+    path.write_text("".join(f"line {n}\n" for n in range(300_000)), encoding="utf-8")
+    text = _read_tail(path)
+    assert text.splitlines()[0] == "line 299985"
+    assert text.splitlines()[-1] == "line 299999"
+    assert "line 1\n" not in text
+
+
+def test_read_tail_cuts_very_long_lines(tmp_path):
+    """Read a log whose only line is 1 MB long.
+
+    What:     One line of at most 300 characters.
+    Why:      One huge line must not flood the error message.
+    Expected: A single line ending in "...", no longer than 300 characters.
+    """
+    path = tmp_path / "log.txt"
+    path.write_text("z" * 1_000_000, encoding="utf-8")
+    lines = _read_tail(path).splitlines()
+    assert len(lines) == 1
+    assert len(lines[0]) == 300
+    assert lines[0].endswith("...")
+
+
+def test_read_tail_drops_a_first_line_that_was_cut(tmp_path):
+    """Read a log whose lines are longer than a tenth of the part that is read.
+
+    What:     Every returned line starts at its real beginning.
+    Why:      Reading from the middle of the file can start in the middle of a line.
+    Expected: Every line starts with "L".
+    """
+    path = tmp_path / "log.txt"
+    path.write_text("".join(f"L{n} " + "y" * 10_000 + "\n" for n in range(20)), encoding="utf-8")
+    lines = _read_tail(path).splitlines()
+    assert 3 <= len(lines) <= 8
+    assert all(line.startswith("L") for line in lines)
+
+
+def test_read_tail_survives_bytes_that_are_not_text(tmp_path):
+    """Read a log that contains bytes that are not valid UTF-8.
+
+    What:     The readable parts come back and nothing is raised.
+    Why:      A server can write anything to stderr.
+    Expected: "ok" is in the result.
+    """
+    path = tmp_path / "log.txt"
+    path.write_bytes(b"\xff\xfe ok \xff\n")
+    assert "ok" in _read_tail(path)
+
+
+def test_sizes_are_shown_in_the_unit_that_reads_best():
+    """Format the limit for a message.
+
+    What:     Megabytes for large limits, bytes for small ones.
+    Why:      "0.0009 MB" would be hard to read.
+    Expected: "8 MB" and "500 bytes".
+    """
+    assert _format_size(8 * 1024 * 1024) == "8 MB"
+    assert _format_size(500) == "500 bytes"
+
+
+def noisy_opener(lines=500, wait_before_connecting=False):
+    """A fake opener whose server writes a lot to stderr, then does nothing."""
+
+    @asynccontextmanager
+    async def open_client(command, env, errlog, raw_pages):
+        errlog.write("noise line token=abcd1234\n" * lines)
+        errlog.flush()
+        if wait_before_connecting:
+            await anyio.sleep(10)
+        yield FakeClient()
+
+    return open_client
+
+
+def test_a_server_that_writes_too_much_to_stderr_is_stopped():
+    """Use a server that writes 13 KB to stderr while the limit is 1 KB.
+
+    What:     The block ends quickly with a ServerError that gives the limit and the end of
+              the log. A secret in the log is hidden.
+    Why:      A server in a loop could otherwise fill the disk before the timeout.
+    Expected: ServerError with "more than 1000 bytes" and "noise line", and without the
+              secret, in well under the 10 seconds the body would otherwise wait.
+    """
+
+    async def main():
+        async with connect(
+            ["s"], env={"API_TOKEN": "abcd1234"}, stderr_limit=1000, open_client=noisy_opener()
+        ):
+            await anyio.sleep(10)
+
+    start = time.perf_counter()
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert time.perf_counter() - start < 5
+    assert "more than 1000 bytes" in str(error.value)
+    assert "noise line" in str(error.value)
+    assert "abcd1234" not in str(error.value)
+
+
+def test_a_server_that_writes_too_much_while_starting_is_stopped():
+    """Use a server that floods stderr before it finishes the handshake.
+
+    What:     A ServerError about stderr, not a start-up time-out.
+    Why:      The cause is the flood, and the message should say so.
+    Expected: ServerError with "more than 1000 bytes".
+    """
+
+    async def main():
+        async with connect(
+            ["s"], stderr_limit=1000, open_client=noisy_opener(wait_before_connecting=True)
+        ):
+            pass
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "more than 1000 bytes" in str(error.value)
+
+
+def test_stderr_below_the_limit_is_fine():
+    """Use a server that writes 500 bytes to stderr while the limit is 1 MB.
+
+    What:     The block runs to the end with no error.
+    Why:      Ordinary logging must not be treated as a flood.
+    Expected: The session works.
+    """
+
+    async def main():
+        async with connect(["s"], open_client=noisy_opener(lines=20)) as active:
+            return await active.list_tools()
+
+    assert run(main) == []
