@@ -193,12 +193,12 @@ def test_lint_rejects_a_file_and_a_server_together(tmp_path):
 
     What:     Exit code 2.
     Why:      It is unclear which one to check, so guessing would hide a mistake.
-    Expected: exit code 2 and "not both" in the output.
+    Expected: exit code 2 and "only one" in the output.
     """
     path = write_tools(tmp_path, [GOOD])
     result = runner.invoke(app, ["lint", "--tools-file", path, "--", "python", "server.py"])
     assert result.exit_code == 2
-    assert "not both" in result.output
+    assert "only one" in result.output
 
 
 # --- A live server ------------------------------------------------------------------------------
