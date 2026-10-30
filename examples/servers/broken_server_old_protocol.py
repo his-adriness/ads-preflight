@@ -1,7 +1,8 @@
 """A hand-written MCP server that can send malformed tool lists. It does not use the SDK.
 
 Usage: python broken_server_old_protocol.py VARIANT
-Variants: good, wrong-key (`input_schema` instead of `inputSchema`), no-schema.
+Variants: good, wrong-key (`input_schema` instead of `inputSchema`), no-schema,
+string-hint (`readOnlyHint` is the string "true").
 
 It speaks the older protocol and answers `initialize` and `tools/list` only. The SDK's own
 server refuses to produce malformed tool lists, so they are written by hand here. Keep this
@@ -22,6 +23,14 @@ VARIANTS = {
     "good": [GOOD_TOOL],
     "wrong-key": [{"name": "t", "description": "d", "input_schema": {"type": "object"}}],
     "no-schema": [{"name": "t", "description": "d"}],
+    "string-hint": [
+        {
+            "name": "t",
+            "description": "d",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": "true"},
+        }
+    ],
 }
 
 

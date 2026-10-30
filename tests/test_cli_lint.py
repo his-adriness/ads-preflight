@@ -299,14 +299,22 @@ def test_lint_of_the_example_server_end_to_end():
     assert "4 tools" in result.output
 
 
-def test_lint_of_a_server_with_a_broken_tool_list_exits_2():
-    """Lint the hand-written server whose tool has no inputSchema.
+@pytest.mark.parametrize(
+    ("variant", "rule", "exit_code"),
+    [
+        ("wrong-key", "core.wrong-schema-key", 1),
+        ("no-schema", "core.missing-input-schema", 0),
+        ("string-hint", "core.hint-not-boolean", 1),
+    ],
+)
+def test_lint_reports_mistakes_the_sdk_would_hide(variant, rule, exit_code):
+    """Lint the hand-written server for each kind of malformed tool.
 
-    What:     Exit code 2 and a message about the protocol.
-    Why:      The SDK rejects this reply, so this message is the signal until the raw
-              reply is read directly.
-    Expected: exit code 2 and "does not follow the MCP protocol" in the output.
+    What:     The matching rule is reported, with the exit code its severity gives.
+    Why:      The SDK rejects or cleans these replies. Developers who write servers by hand
+              are exactly the ones who make these mistakes.
+    Expected: The rule ID in the output, and exit code 1 for an error, 0 for a warning.
     """
-    result = runner.invoke(app, ["lint", "--", sys.executable, str(OLD_SERVER), "no-schema"])
-    assert result.exit_code == 2
-    assert "does not follow the MCP protocol" in result.output
+    result = runner.invoke(app, ["lint", "--", sys.executable, str(OLD_SERVER), variant])
+    assert rule in result.output
+    assert result.exit_code == exit_code, result.output

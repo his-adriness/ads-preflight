@@ -132,9 +132,8 @@ def lint(
     Exit code 0: no errors. 1: errors (or warnings, with --strict).
     2: the input or the server could not be used.
 
-    A live server is checked as the MCP SDK reports it, so a tool list that breaks the
-    protocol (for example a missing inputSchema) stops with exit code 2 and a message.
-    Use --tools-file to get findings for such a list.
+    A live server is checked on the tool list it actually sent, before the MCP SDK cleans it,
+    so the same mistakes are found as with --tools-file.
 
     Examples: ads-preflight lint --tools-file tools.json
               ads-preflight lint -- python server.py

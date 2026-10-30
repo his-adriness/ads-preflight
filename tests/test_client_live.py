@@ -181,23 +181,22 @@ def test_an_older_protocol_server_works():
 
 
 @pytest.mark.parametrize("variant", ["wrong-key", "no-schema"])
-def test_a_malformed_tool_list_is_a_server_error(variant):
-    """List the tools of a server whose tool has no inputSchema.
+def test_a_malformed_tool_list_is_still_read(variant):
+    """List the tools of a server whose tool has no usable inputSchema.
 
-    What:     ServerError that says the reply breaks the protocol and names the field.
-    Why:      The SDK rejects the reply before ads-preflight sees it, so this is the only
-              signal available for now.
-    Expected: ServerError that mentions the protocol and "inputSchema".
+    What:     The tool comes back with no input schema, and no error.
+    Why:      The SDK refuses this reply, but lint needs to see it to report the mistake.
+              Reading the raw reply is the only way.
+    Expected: One tool named "t" with no input schema.
     """
 
     async def main():
         async with connect([sys.executable, str(RAW_SERVER), variant]) as session:
-            await session.list_tools()
+            return await session.list_tools()
 
-    with pytest.raises(ServerError) as error:
-        run(main)
-    assert "does not follow the MCP protocol" in str(error.value)
-    assert "inputSchema" in str(error.value)
+    tools = run(main)
+    assert [tool.name for tool in tools] == ["t"]
+    assert tools[0].inputSchema is None
 
 
 def test_list_server_tools_starts_lists_and_stops():

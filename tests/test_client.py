@@ -12,12 +12,15 @@ from types import SimpleNamespace
 import anyio
 import pytest
 from mcp.shared.exceptions import MCPError
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCResponse
 from pydantic import BaseModel, ValidationError
 
 from ads_preflight.client import (
     ServerError,
     ServerSession,
     ToolNotAllowedError,
+    _RecordingStream,
     connect,
     list_server_tools,
 )
@@ -351,7 +354,7 @@ def opener(client=None, *, enter_error=None, enter_delay=0.0, stderr_text=""):
     """Build a fake `open_client` function."""
 
     @asynccontextmanager
-    async def open_client(command, env, errlog):
+    async def open_client(command, env, errlog, raw_pages):
         if stderr_text:
             errlog.write(stderr_text)
             errlog.flush()
@@ -498,7 +501,7 @@ def test_the_callers_own_error_passes_through_unchanged():
     """
 
     @asynccontextmanager
-    async def wrapping(command, env, errlog):
+    async def wrapping(command, env, errlog, raw_pages):
         try:
             yield FakeClient()
         except ValueError as error:
@@ -540,10 +543,190 @@ def test_list_server_tools_uses_the_timeout_and_returns_tool_defs():
     opened = []
 
     @asynccontextmanager
-    async def open_client(command, env, errlog):
+    async def open_client(command, env, errlog, raw_pages):
         opened.append(list(command))
         yield FakeClient(pages=[([fake_tool("a")], None)])
 
     tools = run(lambda: list_server_tools(["srv"], timeout=5, open_client=open_client))
     assert [tool.name for tool in tools] == ["a"]
     assert opened == [["srv"]]
+
+
+# --- Raw replies ------------------------------------------------------------------------------
+
+
+def a_validation_error():
+    """A pydantic error like the one the SDK raises for a reply it refuses."""
+
+    class Reply(BaseModel):
+        tools: list[dict[str, str]]
+
+    try:
+        Reply.model_validate({"tools": [1]})
+    except ValidationError as invalid:
+        return invalid
+
+
+class RawFakeClient:
+    """An SDK client whose transport saw raw replies. It can also refuse them."""
+
+    def __init__(self, raw_pages, sink, refuse=False):
+        self.raw_pages = raw_pages
+        self.sink = sink
+        self.refuse = refuse
+        self.cursors = []
+
+    async def list_tools(self, cursor=None):
+        self.cursors.append(cursor)
+        raw = self.raw_pages[0 if cursor is None else int(cursor)]
+        self.sink.append(raw)  # the recording stream copies the reply before the SDK looks at it
+        if self.refuse:
+            raise a_validation_error()
+        tools = [fake_tool(tool["name"]) for tool in raw["tools"]]
+        return SimpleNamespace(tools=tools, next_cursor=raw.get("nextCursor"))
+
+
+def raw_session(raw_pages, **options):
+    sink = []
+    client = RawFakeClient(raw_pages, sink, **options)
+    return client, ServerSession(client, raw_pages=sink)
+
+
+def test_a_refused_reply_still_gives_tools_to_lint():
+    """List tools when the SDK refuses the reply but the raw copy was captured.
+
+    What:     The tools are read from the raw copy, with no error.
+    Why:      The mistakes lint looks for (a missing schema) are the ones the SDK refuses.
+    Expected: One tool named "t" that has no input schema.
+    """
+
+    async def main():
+        _, active = raw_session([{"tools": [{"name": "t", "description": "d"}]}], refuse=True)
+        return await active.list_tools()
+
+    tools = run(main)
+    assert [tool.name for tool in tools] == ["t"]
+    assert tools[0].inputSchema is None
+
+
+def test_the_raw_reply_wins_over_the_sdks_cleaned_view():
+    """List tools when the SDK would have changed a value.
+
+    What:     The tool keeps the exact hint the server sent.
+    Why:      The SDK turns "true" into true, which would hide a wrong type from lint.
+    Expected: The annotation holds the string "true", not a boolean.
+    """
+    raw = {"tools": [{"name": "t", "annotations": {"readOnlyHint": "true"}}]}
+
+    async def main():
+        _, active = raw_session([raw])
+        return await active.list_tools()
+
+    tool = run(main)[0]
+    assert tool.annotations.readOnlyHint == "true"
+
+
+def test_pages_are_followed_with_the_raw_cursor_even_when_refused():
+    """List tools over two pages when the SDK refuses every page.
+
+    What:     Both pages are read, and the second request carries the first page's cursor.
+    Why:      A server with many tools must not be linted from its first page only.
+    Expected: Tools "a" and "b", and cursors None and "1".
+    """
+    pages = [
+        {"tools": [{"name": "a"}], "nextCursor": "1"},
+        {"tools": [{"name": "b"}]},
+    ]
+
+    async def main():
+        client, active = raw_session(pages, refuse=True)
+        return client, await active.list_tools()
+
+    client, tools = run(main)
+    assert [tool.name for tool in tools] == ["a", "b"]
+    assert client.cursors == [None, "1"]
+
+
+def test_a_refused_reply_with_no_raw_copy_is_still_an_error():
+    """List tools when the SDK refuses a reply and nothing was captured.
+
+    What:     ServerError about the protocol.
+    Why:      Without the raw data there is nothing to lint, and guessing would hide it.
+    Expected: ServerError mentioning the protocol.
+    """
+
+    async def main():
+        await session(FakeClient(error=a_validation_error())).list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "does not follow the MCP protocol" in str(error.value)
+
+
+def test_a_raw_reply_that_is_not_a_tool_list_is_a_server_error():
+    """List tools when a tool in the raw reply has no name.
+
+    What:     ServerError that names the tool by position.
+    Why:      Lint rules need a name to report on, so this cannot become a finding.
+    Expected: ServerError mentioning the protocol and "tool #1".
+    """
+
+    async def main():
+        _, active = raw_session([{"tools": [{"description": "no name"}]}], refuse=True)
+        await active.list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "does not follow the MCP protocol" in str(error.value)
+    assert "tool #1" in str(error.value)
+
+
+def recording_stream(messages):
+    """A recording stream over an in-memory stream that already holds `messages`."""
+    sink = []
+    sender, receiver = anyio.create_memory_object_stream(len(messages) + 1)
+    for message in messages:
+        sender.send_nowait(message)
+    sender.close()
+    return _RecordingStream(receiver, sink), sink
+
+
+def response(result, request_id=1):
+    return SessionMessage(JSONRPCResponse(jsonrpc="2.0", id=request_id, result=result))
+
+
+def test_the_recording_stream_copies_tool_lists_and_passes_everything_on():
+    """Read three messages through the recording stream: a tool list, another result, an exception.
+
+    What:     Only the tool list is copied, and all three messages come out unchanged.
+    Why:      The recording stream must not change what the SDK receives.
+    Expected: One copied page, and the same three items out.
+    """
+    tool_list = response({"tools": [{"name": "a"}]})
+    other = response({"protocolVersion": "x"}, request_id=2)
+    problem = ValueError("transport trouble")
+
+    async def main():
+        stream, sink = recording_stream([tool_list, other, problem])
+        items = [item async for item in stream]
+        return items, sink
+
+    items, sink = run(main)
+    assert items == [tool_list, other, problem]
+    assert sink == [{"tools": [{"name": "a"}]}]
+
+
+def test_the_recording_stream_ignores_a_result_whose_tools_is_not_a_list():
+    """Read a result where "tools" is a string.
+
+    What:     Nothing is copied.
+    Why:      Only a real tools/list reply should be treated as one.
+    Expected: An empty copy list.
+    """
+
+    async def main():
+        stream, sink = recording_stream([response({"tools": "nope"})])
+        await stream.receive()
+        return sink
+
+    assert run(main) == []
