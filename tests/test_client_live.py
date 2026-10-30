@@ -25,6 +25,7 @@ from ads_preflight.client import (
 SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_server.py"
 NOTES_SERVER = [sys.executable, str(SERVER_FILE)]
 RAW_SERVER = SERVER_FILE.parent / "broken_server_old_protocol.py"
+PROBE_SERVER = SERVER_FILE.parent / "env_probe_server.py"
 
 
 def run(coroutine_function):
@@ -233,3 +234,36 @@ def test_inspect_server_reads_the_identity_of_real_servers():
         "0",
         "2025-06-18",
     )
+
+
+def test_a_named_variable_reaches_the_server():
+    """List the tools of a server that reports whether a variable reached it.
+
+    What:     With the variable passed, the tool name says it is set. Without, missing.
+    Why:      Only the variables we pass should arrive, as the SDK starts the server with a
+              minimal environment.
+    Expected: Tool names PROBE_VAR_is_set and PROBE_VAR_is_missing.
+    """
+    command = [sys.executable, str(PROBE_SERVER), "PROBE_VAR"]
+    with_var = run(lambda: list_server_tools(command, timeout=20, env={"PROBE_VAR": "value1234"}))
+    without = run(lambda: list_server_tools(command, timeout=20))
+    assert [tool.name for tool in with_var] == ["PROBE_VAR_is_set"]
+    assert [tool.name for tool in without] == ["PROBE_VAR_is_missing"]
+
+
+def test_a_secret_a_crashing_server_prints_is_hidden():
+    """Start a server that writes the variable's value to stderr and exits.
+
+    What:     The error message shows the stderr line with *** in place of the value.
+    Why:      This is the leak the redaction exists for.
+    Expected: ServerError with "PROBE_VAR=***" and without the value.
+    """
+    command = [sys.executable, str(PROBE_SERVER), "PROBE_VAR", "leak"]
+
+    async def main():
+        await list_server_tools(command, timeout=20, env={"PROBE_VAR": "value1234"})
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "PROBE_VAR=***" in str(error.value)
+    assert "value1234" not in str(error.value)

@@ -15,6 +15,7 @@ import typer
 
 from ads_preflight import __version__, linter
 from ads_preflight.client import ServerError, inspect_server, list_server_tools
+from ads_preflight.env import EnvError, resolve_env
 from ads_preflight.models import ServerInfo, ToolDef
 from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
 from ads_preflight.reporters.json_reporter import render_json
@@ -87,14 +88,37 @@ TimeoutOption = Annotated[
 ]
 
 
-def _fetch_tools(server: Sequence[str], timeout: float) -> list[ToolDef]:
+EnvOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--env",
+        metavar="NAME",
+        help="Name of an environment variable to pass to the server. Repeat for several. "
+        "Give the name only: the value is read from your own environment.",
+    ),
+]
+
+
+def _server_env(command: str, names: list[str] | None) -> dict[str, str] | None:
+    """Look up the variables named with --env, or stop with exit code 2."""
+    try:
+        return resolve_env(names or []) or None
+    except EnvError as error:
+        _usage_error(command, str(error))
+
+
+def _fetch_tools(
+    server: Sequence[str], timeout: float, env: dict[str, str] | None
+) -> list[ToolDef]:
     """List a live server's tools. Tests replace this function."""
-    return anyio.run(lambda: list_server_tools(server, timeout=timeout))
+    return anyio.run(lambda: list_server_tools(server, timeout=timeout, env=env))
 
 
-def _fetch_inspection(server: Sequence[str], timeout: float) -> tuple[ServerInfo, list[ToolDef]]:
+def _fetch_inspection(
+    server: Sequence[str], timeout: float, env: dict[str, str] | None
+) -> tuple[ServerInfo, list[ToolDef]]:
     """Read a live server's identity and tools. Tests replace this function."""
-    return anyio.run(lambda: inspect_server(server, timeout=timeout))
+    return anyio.run(lambda: inspect_server(server, timeout=timeout, env=env))
 
 
 @app.command()
@@ -102,6 +126,7 @@ def inspect(
     server: ServerArg,
     output_format: FormatOption = OutputFormat.terminal,
     timeout: TimeoutOption = 30.0,
+    env: EnvOption = None,
 ) -> None:
     """List the tools a server offers and whether each says it only reads.
 
@@ -111,8 +136,9 @@ def inspect(
 
     Example: ads-preflight inspect -- python server.py
     """
+    server_env = _server_env("inspect", env)
     try:
-        info, tools = _fetch_inspection(server, timeout)
+        info, tools = _fetch_inspection(server, timeout, server_env)
     except ServerError as error:
         _usage_error("inspect", str(error))
     if output_format is OutputFormat.json:
@@ -149,6 +175,7 @@ def lint(
     output_format: FormatOption = OutputFormat.terminal,
     strict: Annotated[bool, typer.Option("--strict", help="Also fail on warnings.")] = False,
     timeout: TimeoutOption = 30.0,
+    env: EnvOption = None,
 ) -> None:
     """Check a server's tools for common problems.
 
@@ -160,18 +187,22 @@ def lint(
 
     Examples: ads-preflight lint --tools-file tools.json
               ads-preflight lint -- python server.py
+              ads-preflight lint --env API_TOKEN -- python server.py
     """
     if tools_file is None and not server:
         _usage_error("lint", "give --tools-file FILE or a server command after --")
     if tools_file is not None and server:
         _usage_error("lint", "give either --tools-file or a server command, not both")
+    if tools_file is not None and env:
+        _usage_error("lint", "--env only applies when checking a live server")
+    server_env = _server_env("lint", env)
     try:
         if tools_file is not None:
             source = str(tools_file)
             tools = load_tools(tools_file)
         else:
             source = shlex.join(server or [])
-            tools = _fetch_tools(server or [], timeout)
+            tools = _fetch_tools(server or [], timeout, server_env)
     except (ToolsFileError, ServerError) as error:
         _usage_error("lint", str(error))
     findings = linter.lint(tools)
