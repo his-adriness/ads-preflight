@@ -22,6 +22,7 @@ from ads_preflight.client import (
     ToolNotAllowedError,
     _RecordingStream,
     connect,
+    inspect_server,
     list_server_tools,
 )
 
@@ -730,3 +731,55 @@ def test_the_recording_stream_ignores_a_result_whose_tools_is_not_a_list():
         return sink
 
     assert run(main) == []
+
+
+# --- Server details -------------------------------------------------------------------------
+
+
+def test_info_reads_what_the_server_called_itself():
+    """Read the identity of a connected server.
+
+    What:     Name, version and protocol version come from the SDK client.
+    Why:      `inspect` shows them so you can tell which server and revision answered.
+    Expected: The three values as set on the fake.
+    """
+    client = FakeClient()
+    client.server_info = SimpleNamespace(name="Notes", version="1.0")
+    client.protocol_version = "2026-07-28"
+    info = session(client).info
+    assert (info.name, info.version, info.protocol_version) == ("Notes", "1.0", "2026-07-28")
+
+
+def test_info_has_gaps_when_the_server_gave_no_details():
+    """Read the identity of a server that did not identify itself.
+
+    What:     Every part is None, with no error.
+    Why:      Newer protocol revisions make the server name optional.
+    Expected: Three None values, also for an empty version string.
+    """
+    client = FakeClient()
+    client.server_info = None
+    info = session(client).info
+    assert (info.name, info.version, info.protocol_version) == (None, None, None)
+    client.server_info = SimpleNamespace(name="x", version="")
+    assert session(client).info.version is None
+
+
+def test_inspect_server_returns_identity_and_tools():
+    """Inspect through the one-call helper with a fake client.
+
+    What:     The server details and the tools come back together.
+    Why:      `inspect` is built on this helper.
+    Expected: The fake's name and one tool named "a".
+    """
+
+    @asynccontextmanager
+    async def open_client(command, env, errlog, raw_pages):
+        client = FakeClient(pages=[([fake_tool("a")], None)])
+        client.server_info = SimpleNamespace(name="Fake", version="2")
+        client.protocol_version = "p"
+        yield client
+
+    info, tools = run(lambda: inspect_server(["srv"], timeout=5, open_client=open_client))
+    assert info.name == "Fake"
+    assert [tool.name for tool in tools] == ["a"]

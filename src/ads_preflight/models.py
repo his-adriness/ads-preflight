@@ -90,3 +90,13 @@ class ToolDef(BaseModel):
         if hint is False:
             return "write"
         return "unknown"
+
+
+class ServerInfo(BaseModel):
+    """How a server identified itself during the handshake. Any part may be missing."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str | None = None
+    version: str | None = None
+    protocol_version: str | None = None  # The protocol revision both sides agreed on.

@@ -110,11 +110,10 @@ def test_command_help_works(command):
 @pytest.mark.parametrize(
     "args",
     [
-        ["inspect", "--", "python", "server.py"],
         ["run", "tests.yaml", "--", "python", "server.py"],
         ["run", "tests.yaml"],
     ],
-    ids=["inspect", "run-with-server", "run-without-server"],
+    ids=["run-with-server", "run-without-server"],
 )
 def test_stub_commands_fail_loudly(args):
     """Make unfinished commands fail instead of pretending to work.
@@ -138,7 +137,9 @@ def test_server_command_is_passed_through_intact():
     Why:      The server's flags (--port 0, -v) belong to the server, not to us.
     Expected: The output contains "python server.py --port 0 -v".
     """
-    result = runner.invoke(app, ["inspect", "--", "python", "server.py", "--port", "0", "-v"])
+    result = runner.invoke(
+        app, ["run", "tests.yaml", "--", "python", "server.py", "--port", "0", "-v"]
+    )
     assert "python server.py --port 0 -v" in result.output
 
 
@@ -150,7 +151,7 @@ def test_servers_own_options_are_not_mistaken_for_ours():
     Expected: exit code 1 (the stub), not 0 (a printed version), and the
               argument is shown as part of the server command.
     """
-    result = runner.invoke(app, ["inspect", "--", "python", "server.py", "--version"])
+    result = runner.invoke(app, ["run", "tests.yaml", "--", "python", "server.py", "--version"])
     assert result.exit_code == 1
     assert "python server.py --version" in result.output
 
@@ -163,7 +164,7 @@ def test_arguments_with_spaces_stay_one_argument():
               already split the line, and we must not split it again.
     Expected: The output shows it quoted: python 'my server.py'
     """
-    result = runner.invoke(app, ["inspect", "--", "python", "my server.py"])
+    result = runner.invoke(app, ["run", "tests.yaml", "--", "python", "my server.py"])
     assert "python 'my server.py'" in result.output
 
 
