@@ -217,3 +217,19 @@ def _with_stderr(message: str, tail: str) -> str:
         return message
     indented = "\n".join(f"  {line}" for line in tail.splitlines())
     return f"{message}\nthe server wrote this to stderr:\n{indented}"
+
+
+async def list_server_tools(
+    command: Sequence[str],
+    *,
+    timeout: float = 30.0,
+    open_client: OpenClient = _open_sdk_client,
+) -> list[ToolDef]:
+    """Start a server, list its tools and stop it. No tool is ever called.
+
+    `timeout` limits the handshake and each request, in seconds. Raises ServerError.
+    """
+    async with connect(
+        command, connect_timeout=timeout, call_timeout=timeout, open_client=open_client
+    ) as session:
+        return await session.list_tools()

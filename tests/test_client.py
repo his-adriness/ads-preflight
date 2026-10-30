@@ -19,6 +19,7 @@ from ads_preflight.client import (
     ServerSession,
     ToolNotAllowedError,
     connect,
+    list_server_tools,
 )
 
 # --- Fakes --------------------------------------------------------------------------------
@@ -527,3 +528,22 @@ def test_a_server_error_raised_in_the_block_is_not_rewrapped():
     with pytest.raises(ServerError) as error:
         run(main)
     assert str(error.value) == "already clear"
+
+
+def test_list_server_tools_uses_the_timeout_and_returns_tool_defs():
+    """List tools through the one-call helper with a fake client.
+
+    What:     The tools come back as ToolDef, and the fake was opened once.
+    Why:      The helper is the single path `lint` and `inspect` share.
+    Expected: One tool named "a", and one open of the client.
+    """
+    opened = []
+
+    @asynccontextmanager
+    async def open_client(command, env, errlog):
+        opened.append(list(command))
+        yield FakeClient(pages=[([fake_tool("a")], None)])
+
+    tools = run(lambda: list_server_tools(["srv"], timeout=5, open_client=open_client))
+    assert [tool.name for tool in tools] == ["a"]
+    assert opened == [["srv"]]
