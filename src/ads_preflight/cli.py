@@ -43,6 +43,12 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _interrupted(command: str) -> NoReturn:
+    """Stop with exit code 130, the usual code for a run ended with Ctrl-C."""
+    typer.echo(f"ads-preflight {command}: interrupted", err=True)
+    raise typer.Exit(code=130)
+
+
 def _usage_error(command: str, message: str) -> NoReturn:
     """Stop with exit code 2: the input or the server could not be used, no check ran."""
     lines = [clean_text(line) for line in message.splitlines()] or [""]
@@ -132,7 +138,7 @@ def inspect(
 
     It describes and does not judge: use `lint` for that. No tool is called.
 
-    Exit code 0: the server answered. 2: the server could not be used.
+    Exit code 0: the server answered. 2: the server could not be used. 130: interrupted.
 
     Example: ads-preflight inspect -- python server.py
     """
@@ -141,6 +147,8 @@ def inspect(
         info, tools = _fetch_inspection(server, timeout, server_env)
     except ServerError as error:
         _usage_error("inspect", str(error))
+    except KeyboardInterrupt:
+        _interrupted("inspect")
     if output_format is OutputFormat.json:
         typer.echo(render_inspect_json(shlex.join(server), info, tools))
     else:
@@ -180,7 +188,7 @@ def lint(
     """Check a server's tools for common problems.
 
     Exit code 0: no errors. 1: errors (or warnings, with --strict).
-    2: the input or the server could not be used.
+    2: the input or the server could not be used. 130: interrupted with Ctrl-C.
 
     A live server is checked on the tool list it actually sent, before the MCP SDK cleans it,
     so the same mistakes are found as with --tools-file.
@@ -205,6 +213,8 @@ def lint(
             tools = _fetch_tools(server or [], timeout, server_env)
     except (ToolsFileError, ServerError) as error:
         _usage_error("lint", str(error))
+    except KeyboardInterrupt:
+        _interrupted("lint")
     findings = linter.lint(tools)
     if output_format is OutputFormat.json:
         typer.echo(render_json(findings, source, len(tools)))

@@ -6,6 +6,7 @@ Each test docstring has three parts:
   Expected: the output that counts as a pass
 """
 
+import logging
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -14,10 +15,11 @@ import anyio
 import pytest
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCResponse
+from mcp.types import CONNECTION_CLOSED, JSONRPCResponse
 from pydantic import BaseModel, ValidationError
 
 from ads_preflight.client import (
+    RawPages,
     ServerError,
     ServerSession,
     ToolNotAllowedError,
@@ -284,12 +286,12 @@ def test_a_protocol_error_is_a_server_error():
     """
 
     async def main():
-        client = FakeClient(error=MCPError(code=-32000, message="Connection closed"))
+        client = FakeClient(error=MCPError(code=-32601, message="Method not found"))
         await session(client, allowed_tools=["x"]).call_tool("x")
 
     with pytest.raises(ServerError) as error:
         run(main)
-    assert "Connection closed" in str(error.value)
+    assert "Method not found" in str(error.value)
 
 
 def test_a_closed_stream_is_a_server_error():
@@ -1035,3 +1037,89 @@ def test_stderr_below_the_limit_is_fine():
             return await active.list_tools()
 
     assert run(main) == []
+
+
+# --- Clear messages for servers that stop or print the wrong thing -----------------------------
+
+
+def test_a_connection_closed_by_the_server_is_not_called_an_error_reply():
+    """List tools when the SDK reports that the connection closed.
+
+    What:     The message says the server closed the connection.
+    Why:      "The server returned an error" suggests the server answered, but it just stopped.
+    Expected: ServerError with "closed the connection" and without "returned an error".
+    """
+
+    async def main():
+        closed = MCPError(code=CONNECTION_CLOSED, message="Connection closed")
+        await session(FakeClient(error=closed)).list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "closed the connection while trying to list tools" in str(error.value)
+    assert "returned an error" not in str(error.value)
+
+
+def test_text_the_server_printed_on_stdout_is_named_in_the_error():
+    """Fail a request after the server printed a line that is not an MCP message.
+
+    What:     The error quotes the line and says logs belong on stderr.
+    Why:      This is a common mistake, and the symptom (a time-out) does not point to it.
+    Expected: ServerError that contains the line and "stderr".
+    """
+    stray = RawPages()
+    stray.stray.append("server v1.0 listening")
+
+    async def main():
+        closed = MCPError(code=CONNECTION_CLOSED, message="Connection closed")
+        await session(FakeClient(error=closed), raw_pages=stray).list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "server v1.0 listening" in str(error.value)
+    assert "stderr" in str(error.value)
+
+
+def test_the_recording_stream_remembers_lines_that_are_not_messages():
+    """Read a stream that delivers three parse errors and one tool list.
+
+    What:     The first three lines are remembered, quoted as the server wrote them.
+    Why:      The SDK turns each such line into an error value that has the text inside.
+    Expected: Three remembered lines, and the tool list still copied.
+    """
+
+    class Reply(BaseModel):
+        text: str
+
+    def bad_line(text):
+        try:
+            Reply.model_validate_json(text)
+        except ValidationError as invalid:
+            return invalid
+
+    messages = [bad_line(f"noise {n}") for n in range(5)]
+    messages.append(response({"tools": [{"name": "a"}]}))
+
+    async def main():
+        stream, sink = recording_stream(messages)
+        sink = RawPages()
+        stream._raw_pages = sink
+        async for _ in stream:
+            pass
+        return sink
+
+    sink = run(main)
+    assert sink.stray == ["noise 0", "noise 1", "noise 2"]
+    assert sink == [{"tools": [{"name": "a"}]}]
+
+
+def test_the_sdk_logger_has_a_handler_so_it_cannot_print_tracebacks():
+    """Check the logging set-up of the SDK's logger.
+
+    What:     The "mcp" logger has a handler that discards messages.
+    Why:      Without a handler Python prints the SDK's warnings, including a full
+              traceback for every stray stdout line, straight to the terminal.
+    Expected: A NullHandler on logging.getLogger("mcp").
+    """
+    handlers = logging.getLogger("mcp").handlers
+    assert any(isinstance(handler, logging.NullHandler) for handler in handlers)

@@ -379,3 +379,21 @@ def test_env_does_not_apply_to_a_tools_file(tmp_path):
     result = runner.invoke(app, ["lint", "--tools-file", path, "--env", "API_TOKEN"])
     assert result.exit_code == 2
     assert "live server" in result.output
+
+
+def test_ctrl_c_exits_130(monkeypatch):
+    """Lint when the user presses Ctrl-C while the server is being contacted.
+
+    What:     Exit code 130 and a short "interrupted" message, with no traceback.
+    Why:      Exit code 1 means findings failed, and a traceback looks like a crash.
+    Expected: exit code 130 and "interrupted" in the output.
+    """
+
+    def interrupted(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_fetch_tools", interrupted)
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
+    assert result.exit_code == 130
+    assert "interrupted" in result.output
+    assert "Traceback" not in result.output
