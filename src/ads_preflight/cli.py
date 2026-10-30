@@ -1,7 +1,7 @@
 """Command-line interface: ads-preflight inspect, run and lint.
 
-`lint` works on a tools file and on a live server. `inspect` and `run` are stubs for now:
-they only parse their options and will call library code once that code exists.
+`lint` and `inspect` work on a live server, and `lint` also on a tools file. `run` is a stub
+for now: it only parses its options and will call library code once that code exists.
 """
 
 import shlex
@@ -14,8 +14,9 @@ import anyio
 import typer
 
 from ads_preflight import __version__, linter
-from ads_preflight.client import ServerError, list_server_tools
-from ads_preflight.models import ToolDef
+from ads_preflight.client import ServerError, inspect_server, list_server_tools
+from ads_preflight.models import ServerInfo, ToolDef
+from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
 from ads_preflight.reporters.json_reporter import render_json
 from ads_preflight.reporters.terminal import clean_text, render_terminal
 from ads_preflight.tools_file import ToolsFileError, load_tools
@@ -70,13 +71,54 @@ def main(
     """Preflight checks for ad-platform MCP servers: inspect, lint and test."""
 
 
+class OutputFormat(StrEnum):
+    terminal = "terminal"
+    json = "json"
+
+
+FormatOption = Annotated[
+    OutputFormat, typer.Option("--format", help="How to print the result.")
+]
+TimeoutOption = Annotated[
+    float,
+    typer.Option(
+        "--timeout", min=0.1, help="Seconds to wait for the server to start and to answer."
+    ),
+]
+
+
+def _fetch_tools(server: Sequence[str], timeout: float) -> list[ToolDef]:
+    """List a live server's tools. Tests replace this function."""
+    return anyio.run(lambda: list_server_tools(server, timeout=timeout))
+
+
+def _fetch_inspection(server: Sequence[str], timeout: float) -> tuple[ServerInfo, list[ToolDef]]:
+    """Read a live server's identity and tools. Tests replace this function."""
+    return anyio.run(lambda: inspect_server(server, timeout=timeout))
+
+
 @app.command()
-def inspect(server: ServerArg) -> None:
-    """List the tools a server offers.
+def inspect(
+    server: ServerArg,
+    output_format: FormatOption = OutputFormat.terminal,
+    timeout: TimeoutOption = 30.0,
+) -> None:
+    """List the tools a server offers and whether each says it only reads.
+
+    It describes and does not judge: use `lint` for that. No tool is called.
+
+    Exit code 0: the server answered. 2: the server could not be used.
 
     Example: ads-preflight inspect -- python server.py
     """
-    _not_implemented("inspect", server)
+    try:
+        info, tools = _fetch_inspection(server, timeout)
+    except ServerError as error:
+        _usage_error("inspect", str(error))
+    if output_format is OutputFormat.json:
+        typer.echo(render_inspect_json(shlex.join(server), info, tools))
+    else:
+        typer.echo(render_inspect_terminal(info, tools))
 
 
 @app.command()
@@ -94,16 +136,6 @@ def run(
     _not_implemented("run", server)
 
 
-def _fetch_tools(server: Sequence[str], timeout: float) -> list[ToolDef]:
-    """List a live server's tools. Tests replace this function."""
-    return anyio.run(lambda: list_server_tools(server, timeout=timeout))
-
-
-class OutputFormat(StrEnum):
-    terminal = "terminal"
-    json = "json"
-
-
 @app.command()
 def lint(
     server: Annotated[
@@ -114,18 +146,9 @@ def lint(
         Path | None,
         typer.Option("--tools-file", help="A saved tools/list response (JSON) to check."),
     ] = None,
-    output_format: Annotated[
-        OutputFormat, typer.Option("--format", help="How to print the findings.")
-    ] = OutputFormat.terminal,
+    output_format: FormatOption = OutputFormat.terminal,
     strict: Annotated[bool, typer.Option("--strict", help="Also fail on warnings.")] = False,
-    timeout: Annotated[
-        float,
-        typer.Option(
-            "--timeout",
-            min=0.1,
-            help="Seconds to wait for the server to start and to answer.",
-        ),
-    ] = 30.0,
+    timeout: TimeoutOption = 30.0,
 ) -> None:
     """Check a server's tools for common problems.
 

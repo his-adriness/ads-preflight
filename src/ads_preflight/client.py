@@ -26,7 +26,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 from pydantic import ValidationError
 
-from ads_preflight.models import CallRecord, ToolDef
+from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
 
 STDERR_LINES_SHOWN = 15
@@ -131,6 +131,19 @@ class ServerSession:
         self._allowed = frozenset(allowed_tools)
         self._call_timeout = call_timeout
         self._stderr_tail = stderr_tail
+
+    @property
+    def info(self) -> ServerInfo:
+        """How the server identified itself. Parts it did not give are None."""
+        implementation = getattr(self._client, "server_info", None)
+        name = getattr(implementation, "name", None)
+        version = getattr(implementation, "version", None)
+        protocol = getattr(self._client, "protocol_version", None)
+        return ServerInfo(
+            name=name if isinstance(name, str) and name else None,
+            version=version if isinstance(version, str) and version else None,
+            protocol_version=protocol if isinstance(protocol, str) and protocol else None,
+        )
 
     async def list_tools(self) -> list[ToolDef]:
         """Return every tool the server lists, following its pages.
@@ -319,17 +332,29 @@ def _with_stderr(message: str, tail: str) -> str:
     return f"{message}\nthe server wrote this to stderr:\n{indented}"
 
 
+async def inspect_server(
+    command: Sequence[str],
+    *,
+    timeout: float = 30.0,
+    open_client: OpenClient = _open_sdk_client,
+) -> tuple[ServerInfo, list[ToolDef]]:
+    """Start a server, read how it identifies itself and its tools, and stop it.
+
+    No tool is ever called. `timeout` limits the handshake and each request, in seconds.
+    Raises ServerError.
+    """
+    async with connect(
+        command, connect_timeout=timeout, call_timeout=timeout, open_client=open_client
+    ) as session:
+        return session.info, await session.list_tools()
+
+
 async def list_server_tools(
     command: Sequence[str],
     *,
     timeout: float = 30.0,
     open_client: OpenClient = _open_sdk_client,
 ) -> list[ToolDef]:
-    """Start a server, list its tools and stop it. No tool is ever called.
-
-    `timeout` limits the handshake and each request, in seconds. Raises ServerError.
-    """
-    async with connect(
-        command, connect_timeout=timeout, call_timeout=timeout, open_client=open_client
-    ) as session:
-        return await session.list_tools()
+    """Start a server, list its tools and stop it. No tool is ever called."""
+    _, tools = await inspect_server(command, timeout=timeout, open_client=open_client)
+    return tools

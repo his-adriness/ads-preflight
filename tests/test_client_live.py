@@ -14,7 +14,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from ads_preflight.client import ServerError, ToolNotAllowedError, connect, list_server_tools
+from ads_preflight.client import (
+    ServerError,
+    ToolNotAllowedError,
+    connect,
+    inspect_server,
+    list_server_tools,
+)
 
 SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_server.py"
 NOTES_SERVER = [sys.executable, str(SERVER_FILE)]
@@ -208,3 +214,22 @@ def test_list_server_tools_starts_lists_and_stops():
     """
     tools = run(lambda: list_server_tools(NOTES_SERVER, timeout=20))
     assert [tool.name for tool in tools] == ["list_notes", "get_note", "add_note", "delete_note"]
+
+
+def test_inspect_server_reads_the_identity_of_real_servers():
+    """Inspect the example server and the old-protocol server.
+
+    What:     Each reports the name it gives itself, and a protocol version is present.
+    Why:      The two servers use different protocol revisions and identify themselves in
+              different ways, and both must work.
+    Expected: Names "Notes" and "raw", the old server's version "0" and protocol "2025-06-18".
+    """
+    new_info, _ = run(lambda: inspect_server(NOTES_SERVER, timeout=20))
+    old_info, _ = run(lambda: inspect_server([sys.executable, str(RAW_SERVER), "good"], timeout=20))
+    assert new_info.name == "Notes"
+    assert new_info.protocol_version
+    assert (old_info.name, old_info.version, old_info.protocol_version) == (
+        "raw",
+        "0",
+        "2025-06-18",
+    )
