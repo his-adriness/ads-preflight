@@ -26,6 +26,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 from pydantic import ValidationError
 
+from ads_preflight.env import redact
 from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
 
@@ -125,8 +126,10 @@ class ServerSession:
         call_timeout: float = 60.0,
         stderr_tail: Callable[[], str] = lambda: "",
         raw_pages: RawPages | None = None,
+        hide: Callable[[str], str] = lambda text: text,
     ):
         self._client = client
+        self._hide = hide
         self._raw_pages = raw_pages if raw_pages is not None else []
         self._allowed = frozenset(allowed_tools)
         self._call_timeout = call_timeout
@@ -208,7 +211,7 @@ class ServerSession:
                 return await method(*args, **kwargs)
         except TimeoutError:
             message = f"no answer within {self._call_timeout:g} seconds while trying to {action}"
-            raise ServerError(_with_stderr(message, self._stderr_tail())) from None
+            raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from None
         except ValidationError as error:
             # The SDK checks every reply against the protocol and rejects one that does not fit.
             first = error.errors()[0]
@@ -217,13 +220,13 @@ class ServerSession:
                 f"the server's reply does not follow the MCP protocol while trying to {action} "
                 f"({where}: {first['msg']})"
             )
-            raise _ReplyRejected(message) from error
+            raise _ReplyRejected(self._hide(message)) from error
         except MCPError as error:
             message = f"the server returned an error while trying to {action}: {error}"
-            raise ServerError(_with_stderr(message, self._stderr_tail())) from error
+            raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.EndOfStream) as error:
             message = f"the server closed the connection while trying to {action}"
-            raise ServerError(_with_stderr(message, self._stderr_tail())) from error
+            raise ServerError(self._hide(_with_stderr(message, self._stderr_tail()))) from error
 
 
 @asynccontextmanager
@@ -240,7 +243,8 @@ async def connect(
 
     `command` is the server command as a list, such as ["python", "server.py"].
     `allowed_tools` are the only tools that may be called; the default is none.
-    `env` adds environment variables for the server. Raises ServerError if the server
+    `env` adds environment variables for the server; their values are replaced by *** in
+    every error message and stderr excerpt. Raises ServerError if the server
     cannot be started or does not finish the handshake within `connect_timeout` seconds.
     `open_client` exists so tests can swap in a fake.
     """
@@ -252,8 +256,11 @@ async def connect(
         log_path = Path(folder) / "server-stderr.txt"
         with open(log_path, "w", encoding="utf-8", errors="replace") as errlog:
 
+            def hide(text: str) -> str:
+                return redact(text, (env or {}).values())
+
             def stderr_tail() -> str:
-                return _read_tail(log_path)
+                return hide(_read_tail(log_path))
 
             try:
                 deadline = anyio.current_time() + connect_timeout
@@ -267,6 +274,7 @@ async def connect(
                             call_timeout=call_timeout,
                             stderr_tail=stderr_tail,
                             raw_pages=raw_pages,
+                            hide=hide,
                         )
             except Exception as error:
                 leaves = _leaf_errors(error)
@@ -276,10 +284,11 @@ async def connect(
                     if len(leaves) == 1 and leaves[0] is not error:
                         raise leaves[0] from None
                     raise
-                raise _startup_error(command, leaves, stderr_tail()) from error
+                problem = _startup_error(command, leaves, stderr_tail())
+                raise ServerError(hide(str(problem))) from error
             if guard.cancelled_caught and not connected:
                 message = f"the server did not finish starting within {connect_timeout:g} seconds"
-                raise ServerError(_with_stderr(message, stderr_tail()))
+                raise ServerError(hide(_with_stderr(message, stderr_tail())))
 
 
 def _parse_raw_tools(raw: dict[str, Any]) -> list[ToolDef]:
@@ -336,15 +345,16 @@ async def inspect_server(
     command: Sequence[str],
     *,
     timeout: float = 30.0,
+    env: dict[str, str] | None = None,
     open_client: OpenClient = _open_sdk_client,
 ) -> tuple[ServerInfo, list[ToolDef]]:
     """Start a server, read how it identifies itself and its tools, and stop it.
 
     No tool is ever called. `timeout` limits the handshake and each request, in seconds.
-    Raises ServerError.
+    `env` adds environment variables for the server. Raises ServerError.
     """
     async with connect(
-        command, connect_timeout=timeout, call_timeout=timeout, open_client=open_client
+        command, connect_timeout=timeout, call_timeout=timeout, env=env, open_client=open_client
     ) as session:
         return session.info, await session.list_tools()
 
@@ -353,8 +363,9 @@ async def list_server_tools(
     command: Sequence[str],
     *,
     timeout: float = 30.0,
+    env: dict[str, str] | None = None,
     open_client: OpenClient = _open_sdk_client,
 ) -> list[ToolDef]:
     """Start a server, list its tools and stop it. No tool is ever called."""
-    _, tools = await inspect_server(command, timeout=timeout, open_client=open_client)
+    _, tools = await inspect_server(command, timeout=timeout, env=env, open_client=open_client)
     return tools

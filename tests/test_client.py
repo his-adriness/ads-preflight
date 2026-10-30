@@ -783,3 +783,84 @@ def test_inspect_server_returns_identity_and_tools():
     info, tools = run(lambda: inspect_server(["srv"], timeout=5, open_client=open_client))
     assert info.name == "Fake"
     assert [tool.name for tool in tools] == ["a"]
+
+
+# --- Variables and hidden values ------------------------------------------------------------
+
+
+def hide(text):
+    return text.replace("abcd1234", "***")
+
+
+def test_env_reaches_the_client_opener():
+    """Connect with an env dictionary.
+
+    What:     The opener receives exactly that dictionary.
+    Why:      It is how the server gets its variables.
+    Expected: The dictionary passed to connect().
+    """
+    seen = []
+
+    @asynccontextmanager
+    async def open_client(command, env, errlog, raw_pages):
+        seen.append(env)
+        yield FakeClient(pages=[([fake_tool("a")], None)])
+
+    run(lambda: list_server_tools(["srv"], env={"API_TOKEN": "abcd1234"}, open_client=open_client))
+    assert seen == [{"API_TOKEN": "abcd1234"}]
+
+
+def test_secret_values_are_hidden_in_server_stderr():
+    """Fail a request while stderr holds a passed secret.
+
+    What:     The error shows *** where the secret was.
+    Why:      A crashing server may print its own configuration into a CI log.
+    Expected: ServerError with "***" and without the secret.
+    """
+
+    async def main():
+        client = FakeClient(error=anyio.ClosedResourceError())
+        await session(client, stderr_tail=lambda: "config token=abcd1234", hide=hide).list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "***" in str(error.value)
+    assert "abcd1234" not in str(error.value)
+
+
+def test_secret_values_are_hidden_in_a_start_up_failure():
+    """Fail the start-up while the server wrote a passed secret to stderr.
+
+    What:     The start-up error shows *** and not the secret.
+    Why:      Start-up failures are the most common case where servers print their config.
+    Expected: ServerError without the secret.
+    """
+    options = {"stderr_text": "boot token=abcd1234\n", "enter_error": RuntimeError("no handshake")}
+
+    async def main():
+        async with connect(
+            ["s"], env={"API_TOKEN": "abcd1234"}, open_client=opener(**options)
+        ):
+            pass
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "abcd1234" not in str(error.value)
+    assert "boot token=***" in str(error.value)
+
+
+def test_a_server_error_message_cannot_leak_a_secret():
+    """Get an error reply from the server that repeats a passed secret.
+
+    What:     The ServerError hides it.
+    Why:      Servers echo bad configuration in their error messages.
+    Expected: ServerError without the secret.
+    """
+
+    async def main():
+        failing = FakeClient(error=MCPError(code=-32000, message="bad token abcd1234"))
+        await session(failing, hide=hide).list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert "abcd1234" not in str(error.value)

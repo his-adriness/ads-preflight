@@ -1,4 +1,4 @@
-"""Tests for the inspect command, run through the command line.
+"""Tests for the lint command, run through the command line.
 
 Each test docstring has three parts:
   What:     the behavior being checked
@@ -16,157 +16,366 @@ from typer.testing import CliRunner
 from ads_preflight import cli
 from ads_preflight.cli import app
 from ads_preflight.client import ServerError
-from ads_preflight.models import ServerInfo, ToolDef
+from ads_preflight.models import ToolDef
 
 runner = CliRunner()
+
+GOOD = {
+    "name": "list_notes",
+    "description": "List the user's notes.",
+    "inputSchema": {"type": "object"},
+    "annotations": {"readOnlyHint": True},
+}
+WARNING_ONLY = {**GOOD, "description": None}  # missing description is a warning
+HAS_ERROR = [GOOD, GOOD]  # a duplicate name is an error
+
+
+def write_tools(tmp_path, tools):
+    path = tmp_path / "tools.json"
+    path.write_text(json.dumps({"tools": tools}), encoding="utf-8")
+    return str(path)
+
+
+def lint(tmp_path, tools, *options):
+    return runner.invoke(app, ["lint", "--tools-file", write_tools(tmp_path, tools), *options])
+
+
+# --- Exit codes ---------------------------------------------------------------------------
+
+
+def test_clean_tools_exit_0(tmp_path):
+    """Lint a file with a well-formed tool.
+
+    What:     Exit code 0 and a "no problems" summary.
+    Why:      A clean server must pass a CI step.
+    Expected: exit code 0 and "no problems" in the output.
+    """
+    result = lint(tmp_path, [GOOD])
+    assert result.exit_code == 0
+    assert "no problems" in result.output
+
+
+def test_an_error_exits_1(tmp_path):
+    """Lint a file with a duplicate tool name.
+
+    What:     Exit code 1, and the report names the rule.
+    Why:      Errors must fail a CI step.
+    Expected: exit code 1 and "core.duplicate-name" in the output.
+    """
+    result = lint(tmp_path, HAS_ERROR)
+    assert result.exit_code == 1
+    assert "core.duplicate-name" in result.output
+
+
+def test_warnings_alone_exit_0(tmp_path):
+    """Lint a file that has only a warning.
+
+    What:     The warning is shown, and the exit code is 0.
+    Why:      Warnings are advice and should not block a build by default.
+    Expected: exit code 0 and "core.missing-description" in the output.
+    """
+    result = lint(tmp_path, [WARNING_ONLY])
+    assert result.exit_code == 0
+    assert "core.missing-description" in result.output
+
+
+def test_strict_turns_warnings_into_failures(tmp_path):
+    """Lint the same warning-only file with --strict.
+
+    What:     Exit code 1.
+    Why:      Some teams want every finding to block.
+    Expected: exit code 1.
+    """
+    assert lint(tmp_path, [WARNING_ONLY], "--strict").exit_code == 1
+
+
+# --- Output formats --------------------------------------------------------------------------
+
+
+def test_json_format_prints_only_json(tmp_path):
+    """Lint with --format json.
+
+    What:     The whole output parses as one JSON document.
+    Why:      A program reading the output must not meet extra text.
+    Expected: The parsed summary shows one error, and the exit code is still 1.
+    """
+    result = lint(tmp_path, HAS_ERROR, "--format", "json")
+    assert result.exit_code == 1
+    assert json.loads(result.output)["summary"]["error"] == 1
+
+
+def test_unknown_format_is_a_usage_error(tmp_path):
+    """Lint with a format that does not exist.
+
+    What:     Exit code 2.
+    Why:      A typo in the format must not silently fall back to another one.
+    Expected: exit code 2.
+    """
+    assert lint(tmp_path, [GOOD], "--format", "xml").exit_code == 2
+
+
+def test_terminal_output_has_no_color_codes_when_not_a_terminal(tmp_path):
+    """Lint with output captured, as in CI.
+
+    What:     No escape codes in the output.
+    Why:      Color codes would clutter CI logs and break text matching.
+    Expected: No escape character in the output.
+    """
+    assert "\x1b" not in lint(tmp_path, HAS_ERROR).output
+
+
+def test_hostile_tool_name_is_not_echoed_raw(tmp_path):
+    """Lint a file where a tool name carries an escape code.
+
+    What:     The name appears as text.
+    Why:      A file saved from a hostile server must not control the terminal.
+    Expected: No escape character in the output.
+    """
+    evil = {**GOOD, "name": "x\u001b[2J"}
+    assert "\x1b" not in lint(tmp_path, [evil, evil]).output
+
+
+# --- Input problems -----------------------------------------------------------------------------
+
+
+def test_missing_file_exits_2(tmp_path):
+    """Lint a file that does not exist.
+
+    What:     Exit code 2 and a message that names the problem.
+    Why:      A bad input is not a failed check, and CI should tell them apart.
+    Expected: exit code 2 and "cannot read file" in the output.
+    """
+    result = runner.invoke(app, ["lint", "--tools-file", str(tmp_path / "nope.json")])
+    assert result.exit_code == 2
+    assert "cannot read file" in result.output
+
+
+def test_invalid_json_exits_2(tmp_path):
+    """Lint a file that is not JSON.
+
+    What:     Exit code 2 and the loader's message.
+    Why:      The person needs the same helpful message the loader gives.
+    Expected: exit code 2 and "not valid JSON" in the output.
+    """
+    path = tmp_path / "tools.json"
+    path.write_text("{oops", encoding="utf-8")
+    result = runner.invoke(app, ["lint", "--tools-file", str(path)])
+    assert result.exit_code == 2
+    assert "not valid JSON" in result.output
+
+
+def test_a_bad_tool_in_the_file_exits_2_with_its_position(tmp_path):
+    """Lint a file whose second tool has the wrong type for a field.
+
+    What:     Exit code 2 and a message that says which tool.
+    Why:      The loader rejects it before any rule runs.
+    Expected: exit code 2 and "tool #2" in the output.
+    """
+    result = lint(tmp_path, [GOOD, {"name": "b", "description": 5}])
+    assert result.exit_code == 2
+    assert "tool #2" in result.output
+
+
+def test_lint_needs_a_file_or_a_server():
+    """Run lint with nothing to check.
+
+    What:     Exit code 2 that mentions --tools-file.
+    Why:      The person needs to know what to give.
+    Expected: exit code 2 and "--tools-file" in the output.
+    """
+    result = runner.invoke(app, ["lint"])
+    assert result.exit_code == 2
+    assert "--tools-file" in result.output
+
+
+def test_lint_rejects_a_file_and_a_server_together(tmp_path):
+    """Run lint with both a tools file and a server command.
+
+    What:     Exit code 2.
+    Why:      It is unclear which one to check, so guessing would hide a mistake.
+    Expected: exit code 2 and "not both" in the output.
+    """
+    path = write_tools(tmp_path, [GOOD])
+    result = runner.invoke(app, ["lint", "--tools-file", path, "--", "python", "server.py"])
+    assert result.exit_code == 2
+    assert "not both" in result.output
+
+
+# --- A live server ------------------------------------------------------------------------------
 
 SERVER_FILE = Path(__file__).parent.parent / "examples" / "servers" / "notes_server.py"
 OLD_SERVER = SERVER_FILE.parent / "broken_server_old_protocol.py"
 
-INFO = ServerInfo(name="Notes", version="1.0", protocol_version="2026-07-28")
-TOOLS = [
-    ToolDef.model_validate(
-        {"name": "list_notes", "description": "List notes.", "annotations": {"readOnlyHint": True}}
-    ),
-    ToolDef.model_validate({"name": "add_note", "annotations": {"readOnlyHint": False}}),
-]
 
-
-def fake_server(monkeypatch, info=INFO, tools=TOOLS, error=None):
-    """Replace the live fetch with canned data or an error. Returns the calls made."""
+def fake_server(monkeypatch, tools=None, error=None):
+    """Replace the live fetch with canned tools or an error. Returns the calls made."""
     calls = []
 
-    def fetch(server, timeout):
-        calls.append((list(server), timeout))
+    def fetch(server, timeout, env):
+        calls.append((list(server), timeout, env))
         if error:
             raise error
-        return info, list(tools)
+        return [ToolDef.model_validate(tool) for tool in tools or []]
 
-    monkeypatch.setattr(cli, "_fetch_inspection", fetch)
+    monkeypatch.setattr(cli, "_fetch_tools", fetch)
     return calls
 
 
-def test_inspect_prints_the_server_and_its_tools(monkeypatch):
-    """Inspect a server, with the server faked.
+def test_lint_checks_the_tools_a_server_lists(monkeypatch):
+    """Lint a server command, with the server faked.
 
-    What:     The server line, the count line and a row per tool.
-    Why:      This is the whole point of the command.
-    Expected: exit code 0 and the expected text in the output.
+    What:     The tools it lists are checked, and the report names the server command.
+    Why:      The live path must give the same findings as the file path.
+    Expected: exit code 1, "core.duplicate-name" and "python server.py" in the output.
     """
-    calls = fake_server(monkeypatch)
-    result = runner.invoke(app, ["inspect", "--", "python", "server.py"])
-    assert result.exit_code == 0
-    assert "Server: Notes 1.0 (protocol 2026-07-28)" in result.output
-    assert "2 tools: 1 read, 1 write" in result.output
-    assert "list_notes" in result.output
-    assert calls == [(["python", "server.py"], 30.0)]
-
-
-def test_inspect_never_fails_on_what_it_finds(monkeypatch):
-    """Inspect a server whose only tool says nothing about access.
-
-    What:     Exit code 0.
-    Why:      Judging is the job of lint. Inspect only describes.
-    Expected: exit code 0 and "1 unknown" in the output.
-    """
-    silent = [ToolDef(name="mystery")]
-    fake_server(monkeypatch, tools=silent)
-    result = runner.invoke(app, ["inspect", "--", "python", "server.py"])
-    assert result.exit_code == 0
-    assert "1 unknown" in result.output
-
-
-def test_inspect_json_output_parses(monkeypatch):
-    """Inspect with --format json.
-
-    What:     The whole output is one JSON document.
-    Why:      A program reading the output must not meet extra text.
-    Expected: The parsed source and summary are right.
-    """
-    fake_server(monkeypatch)
-    result = runner.invoke(app, ["inspect", "--format", "json", "--", "python", "my server.py"])
-    assert result.exit_code == 0
-    data = json.loads(result.output)
-    assert data["source"] == "python 'my server.py'"
-    assert data["summary"] == {"tools": 2, "read": 1, "write": 1, "unknown": 0}
+    calls = fake_server(monkeypatch, HAS_ERROR)
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
+    assert result.exit_code == 1
+    assert "core.duplicate-name" in result.output
+    assert "python server.py" in result.output
+    assert calls == [(["python", "server.py"], 30.0, None)]
 
 
 def test_timeout_reaches_the_client(monkeypatch):
-    """Inspect with --timeout 5.
+    """Lint with --timeout 5.
 
     What:     The value is passed on as a number of seconds.
     Why:      An option that is parsed but not used would silently do nothing.
     Expected: The fetch was called with 5.0.
     """
-    calls = fake_server(monkeypatch)
-    runner.invoke(app, ["inspect", "--timeout", "5", "--", "python", "server.py"])
+    calls = fake_server(monkeypatch, [GOOD])
+    result = runner.invoke(app, ["lint", "--timeout", "5", "--", "python", "server.py"])
+    assert result.exit_code == 0
     assert calls[0][1] == 5.0
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc"])
 def test_timeout_must_be_a_positive_number(value):
-    """Inspect with a timeout that makes no sense.
+    """Lint with a timeout that makes no sense.
 
     What:     Exit code 2.
     Why:      A zero or negative limit would fail every server for the wrong reason.
     Expected: exit code 2.
     """
-    result = runner.invoke(app, ["inspect", "--timeout", value, "--", "python", "server.py"])
-    assert result.exit_code == 2
-
-
-def test_unknown_format_is_a_usage_error():
-    """Inspect with a format that does not exist.
-
-    What:     Exit code 2.
-    Why:      A typo must not silently fall back to another format.
-    Expected: exit code 2.
-    """
-    result = runner.invoke(app, ["inspect", "--format", "xml", "--", "python", "server.py"])
+    result = runner.invoke(app, ["lint", "--timeout", value, "--", "python", "server.py"])
     assert result.exit_code == 2
 
 
 def test_a_server_that_cannot_be_used_exits_2_with_its_message(monkeypatch):
-    """Inspect a server that fails, with the client faked.
+    """Lint a server that fails to start, with the client faked.
 
-    What:     Exit code 2, the message shown with its lines kept apart.
-    Why:      The server's own output helps the developer fix it.
-    Expected: exit code 2 and both lines of the message in the output.
+    What:     Exit code 2, the message shown as written, its stderr lines kept on separate lines.
+    Why:      "The server crashed" must not look like "the tools are fine", and the
+              server's own output helps the developer fix it.
+    Expected: exit code 2, and the two lines of the message on two output lines.
     """
     fake_server(monkeypatch, error=ServerError("cannot start the server\n  boom"))
-    result = runner.invoke(app, ["inspect", "--", "python", "server.py"])
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
     assert result.exit_code == 2
     assert "cannot start the server\n  boom" in result.output
 
 
-def test_inspect_of_the_example_server_end_to_end():
-    """Inspect the real example server in a child process.
+def test_server_text_cannot_inject_escape_codes(monkeypatch):
+    """Lint a server whose error message carries an escape code.
 
-    What:     The four tools with the access each declares.
-    Why:      This is the whole path: command line, client, report.
-    Expected: exit code 0, the server name, and read/write on the right rows.
+    What:     The escape character is shown as text.
+    Why:      Server output is untrusted and must not control the terminal.
+    Expected: No escape character in the output.
     """
-    result = runner.invoke(app, ["inspect", "--", sys.executable, str(SERVER_FILE)])
-    assert result.exit_code == 0, result.output
-    assert "Server: Notes" in result.output
-    assert "4 tools: 2 read, 2 write" in result.output
-    rows = {line.split()[0]: line.split()[1] for line in result.output.splitlines()[4:]}
-    assert rows == {
-        "list_notes": "read",
-        "get_note": "read",
-        "add_note": "write",
-        "delete_note": "write",
-    }
+    fake_server(monkeypatch, error=ServerError("bad\x1b[2J"))
+    result = runner.invoke(app, ["lint", "--", "python", "server.py"])
+    assert "\x1b" not in result.output
 
 
-def test_inspect_shows_a_malformed_server_instead_of_failing():
-    """Inspect the hand-written server whose tool has no inputSchema.
+def test_lint_of_the_example_server_end_to_end():
+    """Lint the real example server in a child process.
 
-    What:     The tool is listed with access "unknown", and the exit code is 0.
-    Why:      Inspect should show what a server sent even when it is flawed.
-    Expected: exit code 0, the old protocol revision, and "unknown" in the output.
+    What:     The notes server is started, its 4 tools are checked, and the report prints.
+    Why:      This is the whole path a user takes: command line, client, rules, report.
+    Expected: exit code 0 and "4 tools" in the output.
     """
-    result = runner.invoke(app, ["inspect", "--", sys.executable, str(OLD_SERVER), "no-schema"])
+    result = runner.invoke(app, ["lint", "--", sys.executable, str(SERVER_FILE)])
     assert result.exit_code == 0, result.output
-    assert "Server: raw 0 (protocol 2025-06-18)" in result.output
-    assert "unknown" in result.output
+    assert "4 tools" in result.output
+
+
+@pytest.mark.parametrize(
+    ("variant", "rule", "exit_code"),
+    [
+        ("wrong-key", "core.wrong-schema-key", 1),
+        ("no-schema", "core.missing-input-schema", 0),
+        ("string-hint", "core.hint-not-boolean", 1),
+    ],
+)
+def test_lint_reports_mistakes_the_sdk_would_hide(variant, rule, exit_code):
+    """Lint the hand-written server for each kind of malformed tool.
+
+    What:     The matching rule is reported, with the exit code its severity gives.
+    Why:      The SDK rejects or cleans these replies. Developers who write servers by hand
+              are exactly the ones who make these mistakes.
+    Expected: The rule ID in the output, and exit code 1 for an error, 0 for a warning.
+    """
+    result = runner.invoke(app, ["lint", "--", sys.executable, str(OLD_SERVER), variant])
+    assert rule in result.output
+    assert result.exit_code == exit_code, result.output
+
+
+# --- --env --------------------------------------------------------------------------------------
+
+
+def test_env_values_are_read_from_the_environment_and_passed_on(monkeypatch):
+    """Lint with --env API_TOKEN, with the variable set.
+
+    What:     The fetch gets the variable's value.
+    Why:      The value must come from the caller's environment, not the command line.
+    Expected: env equal to {"API_TOKEN": "tok-12345"}.
+    """
+    monkeypatch.setenv("API_TOKEN", "tok-12345")
+    calls = fake_server(monkeypatch, [GOOD])
+    result = runner.invoke(app, ["lint", "--env", "API_TOKEN", "--", "python", "server.py"])
+    assert result.exit_code == 0
+    assert calls[0][2] == {"API_TOKEN": "tok-12345"}
+
+
+def test_a_missing_variable_exits_2_without_starting_the_server(monkeypatch):
+    """Lint with --env for a variable that is not set.
+
+    What:     Exit code 2, a message naming the variable, and no server started.
+    Why:      Starting the server without it would give a confusing failure.
+    Expected: exit code 2, "API_TOKEN" and "not set" in the output, and no fetch.
+    """
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    calls = fake_server(monkeypatch, [GOOD])
+    result = runner.invoke(app, ["lint", "--env", "API_TOKEN", "--", "python", "server.py"])
+    assert result.exit_code == 2
+    assert "API_TOKEN" in result.output
+    assert "not set" in result.output
+    assert calls == []
+
+
+def test_a_value_after_the_name_is_rejected_and_not_echoed(monkeypatch):
+    """Lint with --env API_TOKEN=hunter2-secret.
+
+    What:     Exit code 2, and the value does not appear in the output.
+    Why:      The tool must not print a secret that was typed on the command line.
+    Expected: exit code 2 and "hunter2-secret" absent from the output.
+    """
+    fake_server(monkeypatch, [GOOD])
+    result = runner.invoke(
+        app, ["lint", "--env", "API_TOKEN=hunter2-secret", "--", "python", "server.py"]
+    )
+    assert result.exit_code == 2
+    assert "hunter2-secret" not in result.output
+
+
+def test_env_does_not_apply_to_a_tools_file(tmp_path):
+    """Lint a tools file with --env.
+
+    What:     Exit code 2 that explains the option is for live servers.
+    Why:      Accepting it silently would suggest it did something.
+    Expected: exit code 2 and "live server" in the output.
+    """
+    path = write_tools(tmp_path, [GOOD])
+    result = runner.invoke(app, ["lint", "--tools-file", path, "--env", "API_TOKEN"])
+    assert result.exit_code == 2
+    assert "live server" in result.output
