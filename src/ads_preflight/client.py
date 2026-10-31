@@ -16,9 +16,9 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import Any, TextIO
@@ -32,6 +32,7 @@ from mcp.shared.message import SessionMessage
 from mcp.types import CONNECTION_CLOSED
 from pydantic import ValidationError
 
+from ads_preflight.credentials import secret_values
 from ads_preflight.env import redact
 from ads_preflight.models import CallRecord, ServerInfo, ToolDef
 from ads_preflight.tools_file import ToolsFileError, parse_tools
@@ -69,16 +70,23 @@ OpenClient = Callable[
 
 
 # Opens the SDK client for a server URL. It is given the connect time limit, the list the
-# recording stream fills, and a list that receives the status code of every HTTP error
-# response. Tests replace it with a fake.
-HttpOpenClient = Callable[[str, float, RawPages, list[int]], AbstractAsyncContextManager]
+# recording stream fills, a list that receives the status code of every HTTP response of 300
+# or more, and the headers to send with every request. Tests replace it with a fake.
+HttpOpenClient = Callable[
+    [str, float, RawPages, list[int], Mapping[str, str]], AbstractAsyncContextManager
+]
 
 
 @dataclass(frozen=True)
 class HttpTarget:
-    """A server that is already running and is reached over HTTP."""
+    """A server that is already running and is reached over HTTP.
+
+    `headers` carries credentials. It is left out of repr and comparison, so a secret
+    cannot end up in a log line or an assertion message by accident.
+    """
 
     url: str
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
 
 class ServerError(Exception):
@@ -412,16 +420,26 @@ def _format_size(size: int) -> str:
 
 
 def _open_http_client(
-    url: str, connect_timeout: float, raw_pages: RawPages, statuses: list[int]
+    url: str,
+    connect_timeout: float,
+    raw_pages: RawPages,
+    statuses: list[int],
+    headers: Mapping[str, str],
 ) -> AbstractAsyncContextManager:
     async def record(response: httpx2.Response) -> None:
-        if response.status_code >= 400:
+        if response.status_code >= 300:
             statuses.append(response.status_code)
 
     @asynccontextmanager
     async def transport() -> AsyncIterator[Any]:
         timeout = httpx2.Timeout(connect_timeout, read=300.0)  # A reply may arrive as a stream.
-        async with httpx2.AsyncClient(timeout=timeout, event_hooks={"response": [record]}) as http:
+        # Redirects are not followed: the credentials must go only to the URL that was given.
+        async with httpx2.AsyncClient(
+            timeout=timeout,
+            headers=dict(headers),
+            follow_redirects=False,
+            event_hooks={"response": [record]},
+        ) as http:
             async with streamable_http_client(url, http_client=http) as (read_stream, write_stream):
                 yield _RecordingStream(read_stream, raw_pages), write_stream
 
@@ -434,24 +452,36 @@ async def connect_http(
     *,
     connect_timeout: float = 30.0,
     call_timeout: float = 60.0,
+    headers: Mapping[str, str] | None = None,
     open_client: HttpOpenClient = _open_http_client,
 ) -> AsyncIterator[ServerSession]:
     """Connect to a server that is already running at `url`. No tool can be called.
 
-    The caller checks the URL first (see `urls.check_url`). Raises ServerError if the
+    The caller checks the URL first (see `urls.check_url`). `headers` are sent with every
+    request, and their values are hidden in every error message. Raises ServerError if the
     server cannot be reached, answers with an HTTP error, or does not finish the
     handshake within `connect_timeout` seconds.
     """
+    sent = dict(headers or {})
+    secrets = secret_values(sent)
+
+    def hide(text: str) -> str:
+        return redact(text, secrets)
+
     connected = False
     raw_pages = RawPages()
     statuses: list[int] = []
     try:
         with anyio.CancelScope(deadline=anyio.current_time() + connect_timeout) as guard:
-            async with open_client(url, connect_timeout, raw_pages, statuses) as client:
+            async with open_client(url, connect_timeout, raw_pages, statuses, sent) as client:
                 guard.deadline = math.inf  # The time limit is for connecting only.
                 connected = True
                 yield ServerSession(
-                    client, call_timeout=call_timeout, raw_pages=raw_pages, statuses=statuses
+                    client,
+                    call_timeout=call_timeout,
+                    raw_pages=raw_pages,
+                    hide=hide,
+                    statuses=statuses,
                 )
     except Exception as error:
         leaves = _leaf_errors(error)
@@ -459,22 +489,37 @@ async def connect_http(
             if len(leaves) == 1 and leaves[0] is not error:
                 raise leaves[0] from None
             raise
-        raise _http_startup_error(url, leaves, statuses) from error
+        problem = _http_startup_error(url, leaves, statuses, sent_credentials=bool(sent))
+        raise ServerError(hide(str(problem))) from error
     if guard.cancelled_caught and not connected:
         raise ServerError(
             f"{display_url(url)} did not finish the handshake within {connect_timeout:g} seconds"
         )
 
 
-def _http_startup_error(url: str, leaves: list[BaseException], statuses: list[int]) -> ServerError:
+def _http_startup_error(
+    url: str, leaves: list[BaseException], statuses: list[int], *, sent_credentials: bool = False
+) -> ServerError:
     """Describe why an HTTP server could not be reached or did not answer the handshake."""
     shown = display_url(url)
     if statuses:
         code = statuses[0]
+        if code in (401, 403) and sent_credentials:
+            return ServerError(
+                f"the server at {shown} refused the credentials that were sent (HTTP {code}): "
+                "check that the token is valid and allowed to use this server"
+            )
         if code in (401, 403):
             return ServerError(
                 f"the server at {shown} refused the request (HTTP {code}): it probably needs "
-                "credentials"
+                "credentials. Pass a token with --bearer-env NAME, or another header with "
+                "--header-env HEADER=NAME"
+            )
+        if 300 <= code < 400:
+            return ServerError(
+                f"the server at {shown} redirected the request (HTTP {code}): use the URL it "
+                "redirects to. Redirects are not followed, so that credentials are only sent "
+                "to the URL you gave"
             )
         if code == 404:
             return ServerError(
@@ -582,6 +627,7 @@ async def inspect_server(
             target.url,
             connect_timeout=timeout,
             call_timeout=timeout,
+            headers=target.headers,
             open_client=open_http_client,
         )
     else:

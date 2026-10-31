@@ -15,6 +15,7 @@ import typer
 
 from ads_preflight import __version__, linter
 from ads_preflight.client import HttpTarget, ServerError, inspect_server, list_server_tools
+from ads_preflight.credentials import CredentialsError, build_headers
 from ads_preflight.env import EnvError, resolve_env
 from ads_preflight.models import ServerInfo, ToolDef
 from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
@@ -124,6 +125,28 @@ UrlOption = Annotated[
 ]
 
 
+BearerEnvOption = Annotated[
+    str | None,
+    typer.Option(
+        "--bearer-env",
+        metavar="NAME",
+        help="With --url: name of an environment variable that holds a token. It is sent as "
+        "'Authorization: Bearer <token>'. Give the name only: the value is read from your "
+        "own environment.",
+    ),
+]
+HeaderEnvOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--header-env",
+        metavar="HEADER=NAME",
+        help="With --url: send the value of environment variable NAME as the HTTP header "
+        "HEADER, for example X-Api-Key=MY_KEY. Repeat for several. The value is never "
+        "printed.",
+    ),
+]
+
+
 def _fetch_tools(
     target: Sequence[str] | HttpTarget, timeout: float, env: dict[str, str] | None
 ) -> list[ToolDef]:
@@ -139,7 +162,12 @@ def _fetch_inspection(
 
 
 def _live_target(
-    command: str, server: list[str] | None, url: str | None, env_names: list[str] | None
+    command: str,
+    server: list[str] | None,
+    url: str | None,
+    env_names: list[str] | None,
+    bearer_env: str | None = None,
+    header_env: list[str] | None = None,
 ) -> tuple[Sequence[str] | HttpTarget, str, dict[str, str] | None]:
     """Work out which live server was asked for: what to connect to, its name for reports
     and the variables to pass. Stops with exit code 2 if the options do not fit together."""
@@ -150,9 +178,12 @@ def _live_target(
             _usage_error(command, "--env only applies to a server started from a command")
         try:
             checked = check_url(url)
-        except UrlError as error:
+            headers = build_headers(bearer_env, header_env or [])
+        except (UrlError, CredentialsError) as error:
             _usage_error(command, str(error))
-        return HttpTarget(checked), display_url(checked), None
+        return HttpTarget(checked, headers), display_url(checked), None
+    if bearer_env is not None or header_env:
+        _usage_error(command, "--bearer-env and --header-env only apply together with --url")
     if not server:
         _usage_error(command, "give a server command after -- or a server with --url URL")
     return server, shlex.join(server), _server_env(command, env_names)
@@ -165,6 +196,8 @@ def inspect(
     output_format: FormatOption = OutputFormat.terminal,
     timeout: TimeoutOption = 30.0,
     env: EnvOption = None,
+    bearer_env: BearerEnvOption = None,
+    header_env: HeaderEnvOption = None,
 ) -> None:
     """List the tools a server offers and whether each says it only reads.
 
@@ -174,8 +207,11 @@ def inspect(
 
     Examples: ads-preflight inspect -- python server.py
               ads-preflight inspect --url https://example.com/mcp
+              ads-preflight inspect --url https://example.com/mcp --bearer-env API_TOKEN
     """
-    target, source, server_env = _live_target("inspect", server, url, env)
+    target, source, server_env = _live_target(
+        "inspect", server, url, env, bearer_env, header_env
+    )
     try:
         info, tools = _fetch_inspection(target, timeout, server_env)
     except ServerError as error:
@@ -218,6 +254,8 @@ def lint(
     strict: Annotated[bool, typer.Option("--strict", help="Also fail on warnings.")] = False,
     timeout: TimeoutOption = 30.0,
     env: EnvOption = None,
+    bearer_env: BearerEnvOption = None,
+    header_env: HeaderEnvOption = None,
 ) -> None:
     """Check a server's tools for common problems.
 
@@ -231,6 +269,7 @@ def lint(
               ads-preflight lint -- python server.py
               ads-preflight lint --env API_TOKEN -- python server.py
               ads-preflight lint --url https://example.com/mcp
+              ads-preflight lint --url https://example.com/mcp --bearer-env API_TOKEN
     """
     if tools_file is None and not server and url is None:
         _usage_error("lint", "give --tools-file FILE, a server command after --, or --url URL")
@@ -238,11 +277,15 @@ def lint(
         _usage_error("lint", "give only one of --tools-file, a server command and --url")
     if tools_file is not None and env:
         _usage_error("lint", "--env only applies when checking a live server")
+    if tools_file is not None and (bearer_env is not None or header_env):
+        _usage_error("lint", "--bearer-env and --header-env only apply when checking a live server")
     target: Sequence[str] | HttpTarget = []
     server_env = None
     source = str(tools_file)
     if tools_file is None:
-        target, source, server_env = _live_target("lint", server, url, env)
+        target, source, server_env = _live_target(
+            "lint", server, url, env, bearer_env, header_env
+        )
     try:
         if tools_file is not None:
             tools = load_tools(tools_file)
