@@ -205,16 +205,16 @@ def test_environment_variables_cannot_be_passed_to_a_url():
 def test_connect_http_hands_the_opener_what_it_needs():
     """Connect with a fake opener.
 
-    What:     The opener gets the URL, the time limit, a list for raw replies and a list for
-              status codes. The session works.
-    Why:      The real opener fills those lists as replies arrive.
+    What:     The opener gets the URL, the time limit, a list for raw replies, a list for
+              status codes and the headers. The session works.
+    Why:      The real opener fills those lists as replies arrive and sends the headers.
     Expected: The values passed, and one tool from the fake client.
     """
     seen = []
 
     @asynccontextmanager
-    async def open_client(url, connect_timeout, raw_pages, statuses):
-        seen.append((url, connect_timeout, type(raw_pages).__name__, statuses))
+    async def open_client(url, connect_timeout, raw_pages, statuses, headers):
+        seen.append((url, connect_timeout, type(raw_pages).__name__, statuses, dict(headers)))
         client = SimpleNamespace(
             list_tools=lambda cursor=None: _page(), server_info=None, protocol_version="p"
         )
@@ -232,7 +232,7 @@ def test_connect_http_hands_the_opener_what_it_needs():
 
     tools = run(main)
     assert [tool.name for tool in tools] == ["a"]
-    assert seen == [("https://example.com/mcp", 7, "RawPages", [])]
+    assert seen == [("https://example.com/mcp", 7, "RawPages", [], {})]
 
 
 def test_a_later_failure_mentions_the_http_status():
@@ -386,3 +386,289 @@ def test_a_token_in_the_query_is_hidden_in_the_report(monkeypatch):
     assert '"source": "https://example.com/mcp?***"' in result.output
     assert "abc123" not in result.output
     assert seen == [HttpTarget("https://example.com/mcp?token=abc123")]
+
+
+# --- Credentials ------------------------------------------------------------------------------
+
+TOKEN = "tok-xyz-123456"
+
+
+def inspect_with(url, headers, timeout=20):
+    return run(lambda: inspect_server(HttpTarget(url, headers), timeout=timeout))
+
+
+def test_a_bearer_token_is_sent_with_every_request():
+    """Inspect a server that wants a bearer token, giving the right one.
+
+    What:     The handshake and the tool list work.
+    Why:      The headers must reach the SDK's HTTP client, not only the first request.
+    Expected: The server name and its four tools.
+    """
+    with running_server(EXPECTED_TOKEN=TOKEN) as url:
+        info, tools = inspect_with(url, {"Authorization": f"Bearer {TOKEN}"})
+    assert info.name == "Notes"
+    assert len(tools) == 4
+
+
+def test_a_custom_header_is_sent():
+    """Inspect a server that wants a key in a custom header.
+
+    What:     The handshake works when the header is given.
+    Why:      --header-env must work for servers that do not use Authorization.
+    Expected: Four tools.
+    """
+    with running_server(EXPECTED_HEADER="X-Api-Key=key-98765") as url:
+        _, tools = inspect_with(url, {"X-Api-Key": "key-98765"})
+    assert len(tools) == 4
+
+
+def test_a_server_without_credentials_points_to_the_options():
+    """Inspect a server that answers 401 when no credentials are given.
+
+    What:     The message names --bearer-env and --header-env.
+    Why:      The user should not have to look up how to pass a token.
+    Expected: ServerError with both option names.
+    """
+    with running_server(EXPECTED_TOKEN=TOKEN) as url:
+        with pytest.raises(ServerError) as error:
+            inspect_url(url)
+    assert "--bearer-env" in str(error.value)
+    assert "--header-env" in str(error.value)
+
+
+def test_wrong_credentials_are_reported_without_repeating_them():
+    """Inspect a server with a token it does not accept.
+
+    What:     The message says the credentials were refused and shows no secret.
+    Why:      Telling "needs credentials" to someone who sent some would send them the wrong
+              way, and the token must not appear in logs.
+    Expected: "refused the credentials", and the token absent from the message.
+    """
+    wrong = "tok-wrong-000000"
+    with running_server(EXPECTED_TOKEN=TOKEN) as url:
+        with pytest.raises(ServerError) as error:
+            inspect_with(url, {"Authorization": f"Bearer {wrong}"})
+    assert "refused the credentials" in str(error.value)
+    assert wrong not in str(error.value)
+
+
+def test_a_redirect_is_not_followed_so_credentials_stay_with_the_given_url():
+    """Inspect a server that redirects every request to a closed port.
+
+    What:     A clear error about the redirect, and no connection to the new address.
+    Why:      Following it could send the credentials to a host the user never named.
+    Expected: ServerError with "redirected" and "HTTP 307".
+    """
+    with running_server(REDIRECT_TO="http://127.0.0.1:1/mcp") as url:
+        with pytest.raises(ServerError) as error:
+            inspect_with(url, {"Authorization": f"Bearer {TOKEN}"})
+    assert "redirected" in str(error.value)
+    assert "HTTP 307" in str(error.value)
+    assert TOKEN not in str(error.value)
+
+
+def test_headers_do_not_appear_in_repr_or_comparison():
+    """Print an HttpTarget that carries a token.
+
+    What:     repr shows the URL only, and two targets with different headers are equal.
+    Why:      A secret in a repr ends up in a failed assertion or a log line.
+    Expected: The token absent from repr, and equality by URL.
+    """
+    target = HttpTarget("https://example.com/mcp", {"Authorization": f"Bearer {TOKEN}"})
+    assert TOKEN not in repr(target)
+    assert target == HttpTarget("https://example.com/mcp")
+
+
+def test_a_secret_in_a_start_up_failure_is_hidden():
+    """Fail the handshake with an error text that contains the token.
+
+    What:     The message shows *** in place of the token and of the bare token.
+    Why:      Error text comes from the SDK or the server and may echo what was sent.
+    Expected: ServerError without the token.
+    """
+
+    @asynccontextmanager
+    async def open_client(url, connect_timeout, raw_pages, statuses, headers):
+        raise RuntimeError(f"bad handshake for {TOKEN} and Bearer {TOKEN}")
+        yield
+
+    async def main():
+        async with connect_http(
+            "https://example.com/mcp",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            open_client=open_client,
+        ):
+            pass
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert TOKEN not in str(error.value)
+    assert "***" in str(error.value)
+
+
+def test_a_secret_in_a_later_error_is_hidden():
+    """Fail a request with an MCP error that echoes the token.
+
+    What:     The message shows *** in place of the token.
+    Why:      A server may repeat the credentials it received.
+    Expected: ServerError without the token.
+    """
+
+    class Client:
+        async def list_tools(self, cursor=None):
+            raise MCPError(code=-32601, message=f"unknown credentials {TOKEN}")
+
+    @asynccontextmanager
+    async def open_client(url, connect_timeout, raw_pages, statuses, headers):
+        yield Client()
+
+    async def main():
+        async with connect_http(
+            "https://example.com/mcp",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            open_client=open_client,
+        ) as active:
+            await active.list_tools()
+
+    with pytest.raises(ServerError) as error:
+        run(main)
+    assert TOKEN not in str(error.value)
+    assert "***" in str(error.value)
+
+
+# --- Command line: credentials ------------------------------------------------------------
+
+
+def test_inspect_passes_the_bearer_token_to_the_client(monkeypatch):
+    """Inspect a URL with --bearer-env, with the connection faked.
+
+    What:     The target carries `Authorization: Bearer <value of the variable>`.
+    Why:      The value is read from the environment and must reach the client unchanged.
+    Expected: The header on the target, and the token absent from the output.
+    """
+    seen = []
+
+    def fetch(target, timeout, env):
+        seen.append(target)
+        return ServerInfo(name="x"), [ToolDef(name="t")]
+
+    monkeypatch.setattr(cli, "_fetch_inspection", fetch)
+    result = runner.invoke(
+        app,
+        ["inspect", "--url", "https://example.com/mcp", "--bearer-env", "MY_TOKEN"],
+        env={"MY_TOKEN": TOKEN},
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0].headers == {"Authorization": f"Bearer {TOKEN}"}
+    assert TOKEN not in result.output
+
+
+def test_lint_passes_header_env_to_the_client(monkeypatch):
+    """Lint a URL with --header-env, with the connection faked.
+
+    What:     The target carries the header read from the named variable.
+    Why:      lint takes the same credential options as inspect.
+    Expected: The header on the target and exit code 0.
+    """
+    seen = []
+
+    def fetch(target, timeout, env):
+        seen.append(target)
+        return [ToolDef(name="t", description="Does a thing.")]
+
+    monkeypatch.setattr(cli, "_fetch_tools", fetch)
+    result = runner.invoke(
+        app,
+        ["lint", "--url", "https://example.com/mcp", "--header-env", "X-Api-Key=MY_KEY"],
+        env={"MY_KEY": "key-98765"},
+    )
+    assert result.exit_code in (0, 1), result.output
+    assert seen[0].headers == {"X-Api-Key": "key-98765"}
+
+
+def test_inspect_with_a_token_works_end_to_end():
+    """Inspect a real local server that wants a token, through the command line.
+
+    What:     Exit code 0 and the tool list.
+    Why:      Checks the whole path from the environment variable to the HTTP header.
+    Expected: exit code 0, "4 tools" in the output.
+    """
+    with running_server(EXPECTED_TOKEN=TOKEN) as url:
+        result = runner.invoke(
+            app,
+            ["inspect", "--url", url, "--bearer-env", "MY_TOKEN", "--timeout", "20"],
+            env={"MY_TOKEN": TOKEN},
+        )
+    assert result.exit_code == 0, result.output
+    assert "4 tools" in result.output
+
+
+def test_a_missing_token_variable_exits_2():
+    """Name a variable that is not set.
+
+    What:     Exit code 2 and a message naming the variable.
+    Why:      Sending no credentials would look like a server problem.
+    Expected: exit code 2 and "NOPE_TOKEN is not set".
+    """
+    result = runner.invoke(
+        app, ["inspect", "--url", "https://example.com/mcp", "--bearer-env", "NOPE_TOKEN"]
+    )
+    assert result.exit_code == 2
+    assert "NOPE_TOKEN is not set" in result.output
+
+
+def test_a_token_typed_on_the_command_line_exits_2_and_is_not_echoed():
+    """Type a token where the variable name belongs.
+
+    What:     Exit code 2, and the token does not appear in the output.
+    Why:      The tool must not print a secret that was typed on the command line.
+    Expected: exit code 2 and the token absent.
+    """
+    result = runner.invoke(
+        app, ["inspect", "--url", "https://example.com/mcp", "--bearer-env", "sk-live-hunter2xx"]
+    )
+    assert result.exit_code == 2
+    assert "hunter2xx" not in result.output
+
+
+def test_credential_options_need_a_url():
+    """Give --bearer-env together with a server command.
+
+    What:     Exit code 2 and a message about --url.
+    Why:      A started server gets its secrets through --env, not headers.
+    Expected: exit code 2 and "--url" in the output.
+    """
+    result = runner.invoke(
+        app, ["inspect", "--bearer-env", "MY_TOKEN", "--", "python", "server.py"]
+    )
+    assert result.exit_code == 2
+    assert "--url" in result.output
+
+
+def test_lint_credential_options_cannot_be_used_with_a_tools_file(tmp_path):
+    """Give --header-env while linting a saved file.
+
+    What:     Exit code 2.
+    Why:      A file has nothing to authenticate to.
+    Expected: exit code 2 and "live server" in the output.
+    """
+    path = tmp_path / "tools.json"
+    path.write_text('{"tools": []}', encoding="utf-8")
+    result = runner.invoke(
+        app, ["lint", "--tools-file", str(path), "--header-env", "X-Api-Key=MY_KEY"]
+    )
+    assert result.exit_code == 2
+    assert "live server" in result.output
+
+
+def test_a_401_without_credentials_points_to_the_options_on_the_command_line():
+    """Inspect a server that wants a token without giving one.
+
+    What:     Exit code 2 and a message that names --bearer-env.
+    Why:      The next step should be clear from the message alone.
+    Expected: exit code 2 and "--bearer-env" in the output.
+    """
+    with running_server(EXPECTED_TOKEN=TOKEN) as url:
+        result = runner.invoke(app, ["inspect", "--url", url, "--timeout", "20"])
+    assert result.exit_code == 2
+    assert "--bearer-env" in result.output
