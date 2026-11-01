@@ -98,9 +98,11 @@ def test_equal_records_compare_equal():
 def test_fields_contract():
     """Fields contract.
 
-    What:     The model has exactly these five fields, in this order.
+    What:     The model has exactly these six fields, in this order.
     Why:      A rename or an extra field would break JSONL files that were already saved.
-    Expected: The field names are tool, arguments, result, is_error, latency_ms.
+              structured_content came last and is optional, so older files still load.
+    Expected: The field names are tool, arguments, result, is_error, latency_ms,
+              structured_content.
     """
     assert list(CallRecord.model_fields) == [
         "tool",
@@ -108,7 +110,20 @@ def test_fields_contract():
         "result",
         "is_error",
         "latency_ms",
+        "structured_content",
     ]
+
+
+def test_a_record_saved_before_structured_content_still_loads():
+    """Load a record written without the structured_content field.
+
+    What:     It loads, and structured_content is None.
+    Why:      Saved sessions from earlier versions must keep working.
+    Expected: A record equal to one built without the field.
+    """
+    old = '{"tool": "t", "arguments": {}, "result": "ok", "is_error": false, "latency_ms": 1.0}'
+    record = CallRecord.model_validate_json(old)
+    assert record.structured_content is None
 
 
 def test_result_is_required():
@@ -126,7 +141,7 @@ def test_result_is_required():
 def test_dump_has_only_fields_not_the_text_property():
     """Dump has only fields not the text property.
 
-    What:     model_dump() holds the five fields and not the .text helper.
+    What:     model_dump() holds the 6 fields and not the .text helper.
     Why:      Records forbid extra fields, so a dumped 'text' key would make a saved record fail to
               load again.
     Expected: The dumped keys equal the field names, and "text" is absent.

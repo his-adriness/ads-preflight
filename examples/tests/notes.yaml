@@ -1,0 +1,30 @@
+# Tests for the example notes server. The runner will take this file as:
+#   ads-preflight run examples/tests/notes.yaml
+version: 1
+
+server:
+  command: [python, examples/servers/notes_server.py]
+  timeout: 30
+
+# The only tools a test may call. Each must say it only reads.
+allow_tools: [list_notes, get_note]
+
+tests:
+  - name: lists the notes
+    call: list_notes
+    expect:
+      text_contains: ["1", "2"]
+      max_latency_ms: 5000
+
+  - name: reads one note
+    call: get_note
+    arguments: {note_id: "1"}
+    expect:
+      text_equals: first note
+
+  - name: a missing note is an error
+    call: get_note
+    arguments: {note_id: "nope"}
+    expect:
+      is_error: true
+      text_contains: no note with id nope

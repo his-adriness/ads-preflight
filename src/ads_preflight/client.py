@@ -263,6 +263,7 @@ class ServerSession:
             result=[block.model_dump(by_alias=True, exclude_none=True) for block in result.content],
             is_error=bool(result.is_error),
             latency_ms=latency_ms,
+            structured_content=getattr(result, "structured_content", None),
         )
 
     def _note(self) -> str:
