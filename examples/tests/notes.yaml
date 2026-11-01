@@ -1,4 +1,4 @@
-# Tests for the example notes server. The runner will take this file as:
+# Tests for the example notes server. Run them from the repository folder:
 #   ads-preflight run examples/tests/notes.yaml
 version: 1
 
@@ -13,7 +13,7 @@ tests:
   - name: lists the notes
     call: list_notes
     expect:
-      text_contains: ["1", "2"]
+      structured_equals: {result: ["1", "2"]}
       max_latency_ms: 5000
 
   - name: reads one note
@@ -27,4 +27,4 @@ tests:
     arguments: {note_id: "nope"}
     expect:
       is_error: true
-      text_contains: no note with id nope
+      text_contains: Error executing tool get_note

@@ -451,13 +451,15 @@ def _open_http_client(
 async def connect_http(
     url: str,
     *,
+    allowed_tools: Collection[str] = (),
     connect_timeout: float = 30.0,
     call_timeout: float = 60.0,
     headers: Mapping[str, str] | None = None,
     open_client: HttpOpenClient = _open_http_client,
 ) -> AsyncIterator[ServerSession]:
-    """Connect to a server that is already running at `url`. No tool can be called.
+    """Connect to a server that is already running at `url`.
 
+    `allowed_tools` are the only tools that may be called; the default is none.
     The caller checks the URL first (see `urls.check_url`). `headers` are sent with every
     request, and their values are hidden in every error message. Raises ServerError if the
     server cannot be reached, answers with an HTTP error, or does not finish the
@@ -479,6 +481,7 @@ async def connect_http(
                 connected = True
                 yield ServerSession(
                     client,
+                    allowed_tools=allowed_tools,
                     call_timeout=call_timeout,
                     raw_pages=raw_pages,
                     hide=hide,

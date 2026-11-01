@@ -1,7 +1,7 @@
 """Command-line interface: ads-preflight inspect, run and lint.
 
-`lint` and `inspect` work on a live server, and `lint` also on a tools file. `run` is a stub
-for now: it only parses its options and will call library code once that code exists.
+`lint` and `inspect` work on a live server, and `lint` also on a tools file. `run` calls the
+tools a test file allows and checks the results.
 """
 
 import shlex
@@ -20,7 +20,10 @@ from ads_preflight.env import EnvError, resolve_env
 from ads_preflight.models import ServerInfo, ToolDef
 from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
 from ads_preflight.reporters.json_reporter import render_json
+from ads_preflight.reporters.run_report import render_run_terminal
 from ads_preflight.reporters.terminal import clean_text, render_terminal
+from ads_preflight.runner import RunResult, RunSetupError, run_suite
+from ads_preflight.testfile import SuiteFileError, SuiteSpec, load_suite
 from ads_preflight.tools_file import ToolsFileError, load_tools
 from ads_preflight.urls import UrlError, check_url, display_url
 
@@ -56,13 +59,6 @@ def _usage_error(command: str, message: str) -> NoReturn:
     lines = [clean_text(line) for line in message.splitlines()] or [""]
     typer.echo(f"ads-preflight {command}: " + "\n".join(lines), err=True)
     raise typer.Exit(code=2)
-
-
-def _not_implemented(command: str, server: list[str] | None = None) -> NoReturn:
-    """Stop with exit code 1, so a pipeline that calls a stub fails loudly."""
-    detail = f" (server: {shlex.join(server)})" if server else ""
-    typer.echo(f"ads-preflight {command}: not implemented yet{detail}", err=True)
-    raise typer.Exit(code=1)
 
 
 @app.callback()
@@ -161,6 +157,13 @@ def _fetch_inspection(
     return anyio.run(lambda: inspect_server(target, timeout=timeout, env=env))
 
 
+def _execute(
+    suite: SuiteSpec, target: Sequence[str] | HttpTarget, timeout: float, env: dict[str, str] | None
+) -> RunResult:
+    """Run a test file against a live server. Tests replace this function."""
+    return anyio.run(lambda: run_suite(suite, target, timeout=timeout, env=env))
+
+
 def _live_target(
     command: str,
     server: list[str] | None,
@@ -231,12 +234,66 @@ def run(
         list[str] | None,
         typer.Argument(help="Server command after a double dash. Overrides the file's own."),
     ] = None,
+    url: UrlOption = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            min=0.1,
+            help="Seconds to wait for the server to start and to answer each call. "
+            "Default: the file's server timeout, or 30.",
+        ),
+    ] = None,
+    env: EnvOption = None,
+    bearer_env: BearerEnvOption = None,
+    header_env: HeaderEnvOption = None,
 ) -> None:
     """Run the tests in a YAML file against a server.
 
-    Example: ads-preflight run tests/notes.yaml -- python server.py
+    Only the tools the file lists in allow_tools are called, and each must say it only
+    reads. A server given here (after -- or with --url) replaces the one in the file.
+
+    Exit code 0: every test passed. 1: a test failed. 2: the file or the server could not
+    be used, or the server stopped partway. 130: interrupted with Ctrl-C.
+
+    Examples: ads-preflight run examples/tests/notes.yaml
+              ads-preflight run tests.yaml -- python server.py
+              ads-preflight run tests.yaml --url https://example.com/mcp --bearer-env API_TOKEN
     """
-    _not_implemented("run", server)
+    try:
+        suite = load_suite(test_file)
+    except SuiteFileError as error:
+        _usage_error("run", str(error))
+    spec = suite.server
+    if server or url is not None:
+        chosen = (server, url, env, bearer_env, header_env)  # The file's server is not used.
+    elif spec is not None and (spec.command or spec.url is not None):
+        chosen = (
+            spec.command,
+            spec.url,
+            env or spec.env,
+            bearer_env if bearer_env is not None else spec.bearer_env,
+            header_env or spec.header_env,
+        )
+    else:
+        _usage_error(
+            "run",
+            "no server to test: give a command after --, --url URL, or a server: block "
+            "with a command or url in the test file",
+        )
+    target, _, server_env = _live_target("run", *chosen)
+    limit = timeout if timeout is not None else (spec.timeout if spec is not None else 30.0)
+    try:
+        result = _execute(suite, target, limit, server_env)
+    except (ServerError, RunSetupError) as error:
+        _usage_error("run", str(error))
+    except KeyboardInterrupt:
+        _interrupted("run")
+    typer.echo(render_run_terminal(result, str(test_file), color=True))
+    if result.stopped is not None:
+        raise typer.Exit(code=2)
+    if not result.ok:
+        raise typer.Exit(code=1)
 
 
 @app.command()
