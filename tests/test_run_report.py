@@ -6,9 +6,11 @@ Each test docstring has three parts:
   Expected: the output that counts as a pass
 """
 
+import json
+
 from ads_preflight.assertions import Failure
 from ads_preflight.models import CallRecord, ServerInfo
-from ads_preflight.reporters.run_report import render_run_terminal
+from ads_preflight.reporters.run_report import render_run_json, render_run_terminal
 from ads_preflight.runner import CaseResult, RunResult
 
 
@@ -138,3 +140,74 @@ def test_an_empty_run_renders():
     Expected: "0 tests".
     """
     assert "0 tests" in render([])
+
+
+# --- JSON ----------------------------------------------------------------------------------------
+
+
+def render_json(cases, stopped=None, info=None):
+    result = RunResult(info or ServerInfo(name="Notes", version="1.2"), tuple(cases), stopped)
+    return json.loads(render_run_json(result, "tests.yaml"))
+
+
+def test_json_has_the_source_the_server_and_a_summary():
+    """Render a run as JSON.
+
+    What:     The source, the server fields and the counts, with every count present.
+    Why:      Programs read these keys, so they must always be there.
+    Expected: The values for a run with one of each status.
+    """
+    report = render_json([passed(), failed(), not_run()], stopped="boom")
+    assert report["source"] == "tests.yaml"
+    assert report["server"] == {"name": "Notes", "version": "1.2", "protocolVersion": None}
+    assert report["summary"] == {"tests": 3, "passed": 1, "failed": 1, "notRun": 1}
+    assert report["stopped"] == "boom"
+
+
+def test_json_lists_each_test_with_its_status_and_failures():
+    """Render passed, failed and not run tests as JSON.
+
+    What:     One entry per test, in file order, with status, tool, latency and failures.
+    Why:      CI tools build dashboards from this.
+    Expected: The three entries as described, latency null for the test that did not run.
+    """
+    tests = render_json([passed(), failed(), not_run()])["tests"]
+    assert [t["status"] for t in tests] == ["passed", "failed", "not_run"]
+    assert tests[0] == {
+        "name": "first",
+        "tool": "read_a",
+        "status": "passed",
+        "latencyMs": 12.4,
+        "failures": [],
+    }
+    assert tests[1]["failures"] == [
+        {"check": "text_contains", "message": "the text does not contain 'x'"}
+    ]
+    assert tests[2]["latencyMs"] is None
+
+
+def test_json_does_not_carry_the_servers_results():
+    """Render a run whose call returned data.
+
+    What:     The report has no field for the call's result or arguments.
+    Why:      Reports go to CI logs and must not carry account data by default.
+    Expected: The word "result" is absent from the keys of a test entry.
+    """
+    call = CallRecord(tool="t", arguments={"id": "SECRET"}, result="TOPSECRET", latency_ms=1.0)
+    case = CaseResult("first", "read_a", "passed", record=call)
+    text = render_run_json(RunResult(ServerInfo(), (case,)), "tests.yaml")
+    assert "TOPSECRET" not in text and "SECRET" not in text
+
+
+def test_json_escapes_text_from_the_server():
+    """Render a failure whose message contains an escape code.
+
+    What:     The output is valid JSON and has no raw control character.
+    Why:      The text comes from the server being checked.
+    Expected: json.loads works and the raw text has no ESC byte.
+    """
+    case = failed(message="got \x1b[31mred")
+    result = RunResult(ServerInfo(name="evil\x1b"), (case,))
+    text = render_run_json(result, "tests.yaml")
+    assert "\x1b" not in text
+    assert json.loads(text)["tests"][0]["failures"][0]["message"] == "got \x1b[31mred"

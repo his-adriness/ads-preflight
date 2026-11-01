@@ -9,7 +9,9 @@ Each test docstring has three parts:
   Expected: the output that counts as a pass
 """
 
+import json
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -382,6 +384,83 @@ def test_text_from_the_server_cannot_change_the_terminal(tmp_path, monkeypatch):
     fake_execute(monkeypatch, RunResult(ServerInfo(), (failed,)))
     result = runner.invoke(app, ["run", write(tmp_path), "--", "python", "s.py"])
     assert "\x1b[31m" not in result.output
+
+
+# --- Output formats ---------------------------------------------------------------------------
+
+
+def test_json_format_prints_json(tmp_path, monkeypatch):
+    """Run with --format json.
+
+    What:     The output is a JSON report, with the same exit code as the terminal report.
+    Why:      Programs read the result.
+    Expected: exit code 0, and a document whose summary says one test passed.
+    """
+    fake_execute(monkeypatch)
+    result = runner.invoke(
+        app, ["run", write(tmp_path), "--format", "json", "--", "python", "s.py"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["summary"]["passed"] == 1
+
+
+def test_junit_format_prints_xml(tmp_path, monkeypatch):
+    """Run with --format junit.
+
+    What:     The output is JUnit XML with one test case.
+    Why:      CI systems read it.
+    Expected: exit code 0 and a parsed testcase named "first".
+    """
+    fake_execute(monkeypatch)
+    result = runner.invoke(
+        app, ["run", write(tmp_path), "--format", "junit", "--", "python", "s.py"]
+    )
+    assert result.exit_code == 0, result.output
+    assert ET.fromstring(result.output).find("testsuite/testcase").attrib["name"] == "first"
+
+
+def test_a_failed_test_still_exits_1_in_every_format(tmp_path, monkeypatch):
+    """Run a failing test with each format.
+
+    What:     Exit code 1 for terminal, json and junit.
+    Why:      A CI job must fail on a failed test, whatever it does with the report.
+    Expected: Exit code 1 three times.
+    """
+    failed = CaseResult(
+        "first", "read_a", "failed", (Failure("text_equals", "expected x but got y"),), record()
+    )
+    fake_execute(monkeypatch, RunResult(ServerInfo(), (failed,)))
+    for name in ("terminal", "json", "junit"):
+        args = ["run", write(tmp_path), "--format", name, "--", "python", "s.py"]
+        assert runner.invoke(app, args).exit_code == 1, name
+
+
+def test_an_unknown_format_is_a_usage_error(tmp_path):
+    """Give a format that does not exist.
+
+    What:     Exit code 2.
+    Why:      Failing loudly beats printing something unexpected.
+    Expected: exit code 2.
+    """
+    args = ["run", write(tmp_path), "--format", "html", "--", "python", "s.py"]
+    assert runner.invoke(app, args).exit_code == 2
+
+
+def test_junit_end_to_end():
+    """Run the example file with --format junit against the example server.
+
+    What:     Valid XML with three test cases and no failures.
+    Why:      The whole path, ending in the format CI reads.
+    Expected: exit code 0, tests "3", failures "0".
+    """
+    result = runner.invoke(
+        app,
+        ["run", str(NOTES_FILE), "--format", "junit", "--timeout", "30", "--",
+         sys.executable, str(SERVER)],
+    )
+    assert result.exit_code == 0, result.output
+    suite = ET.fromstring(result.output).find("testsuite")
+    assert suite.attrib["tests"] == "3" and suite.attrib["failures"] == "0"
 
 
 # --- The example server -------------------------------------------------------------------------

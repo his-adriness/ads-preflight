@@ -20,7 +20,8 @@ from ads_preflight.env import EnvError, resolve_env
 from ads_preflight.models import ServerInfo, ToolDef
 from ads_preflight.reporters.inspect_report import render_inspect_json, render_inspect_terminal
 from ads_preflight.reporters.json_reporter import render_json
-from ads_preflight.reporters.run_report import render_run_terminal
+from ads_preflight.reporters.junit import render_run_junit
+from ads_preflight.reporters.run_report import render_run_json, render_run_terminal
 from ads_preflight.reporters.terminal import clean_text, render_terminal
 from ads_preflight.runner import RunResult, RunSetupError, run_suite
 from ads_preflight.testfile import SuiteFileError, SuiteSpec, load_suite
@@ -81,6 +82,20 @@ class OutputFormat(StrEnum):
     json = "json"
 
 
+class RunFormat(StrEnum):
+    terminal = "terminal"
+    json = "json"
+    junit = "junit"
+
+
+RunFormatOption = Annotated[
+    RunFormat,
+    typer.Option(
+        "--format",
+        help="How to print the result. junit is the XML that CI systems read; to keep it, "
+        "redirect the output to a file.",
+    ),
+]
 FormatOption = Annotated[
     OutputFormat, typer.Option("--format", help="How to print the result.")
 ]
@@ -235,6 +250,7 @@ def run(
         typer.Argument(help="Server command after a double dash. Overrides the file's own."),
     ] = None,
     url: UrlOption = None,
+    output_format: RunFormatOption = RunFormat.terminal,
     timeout: Annotated[
         float | None,
         typer.Option(
@@ -259,6 +275,7 @@ def run(
     Examples: ads-preflight run examples/tests/notes.yaml
               ads-preflight run tests.yaml -- python server.py
               ads-preflight run tests.yaml --url https://example.com/mcp --bearer-env API_TOKEN
+              ads-preflight run tests.yaml --format junit > report.xml
     """
     try:
         suite = load_suite(test_file)
@@ -289,7 +306,13 @@ def run(
         _usage_error("run", str(error))
     except KeyboardInterrupt:
         _interrupted("run")
-    typer.echo(render_run_terminal(result, str(test_file), color=True))
+    source = str(test_file)
+    if output_format is RunFormat.json:
+        typer.echo(render_run_json(result, source))
+    elif output_format is RunFormat.junit:
+        typer.echo(render_run_junit(result, source))
+    else:
+        typer.echo(render_run_terminal(result, source, color=True))
     if result.stopped is not None:
         raise typer.Exit(code=2)
     if not result.ok:

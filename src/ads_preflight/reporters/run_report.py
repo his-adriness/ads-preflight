@@ -1,5 +1,7 @@
 """Terminal report for `run`: a summary line, then one entry per test."""
 
+import json
+
 import click
 
 from ads_preflight.reporters.terminal import clean_text
@@ -56,3 +58,38 @@ def _case_lines(case: CaseResult, color: bool) -> list[str]:
         problem = f"{clean_text(failure.check)}: {clean_text(failure.message)}"
         lines.append(f"{'':<{_LABEL_WIDTH + 2}}  {problem}")
     return lines
+
+
+def render_run_json(result: RunResult, source: str) -> str:
+    """Format a run as JSON text, for programs to read.
+
+    A test's result from the server is not included, only the reason a check failed. A
+    report goes to CI logs and must not carry account data by default.
+    """
+    report = {
+        "source": source,
+        "server": {
+            "name": result.server.name,
+            "version": result.server.version,
+            "protocolVersion": result.server.protocol_version,
+        },
+        "summary": {
+            "tests": len(result.cases),
+            "passed": result.count("passed"),
+            "failed": result.count("failed"),
+            "notRun": result.count("not_run"),
+        },
+        "stopped": result.stopped,
+        "tests": [_case_json(case) for case in result.cases],
+    }
+    return json.dumps(report, indent=2)
+
+
+def _case_json(case: CaseResult) -> dict[str, object]:
+    return {
+        "name": case.name,
+        "tool": case.tool,
+        "status": case.status,
+        "latencyMs": round(case.record.latency_ms, 3) if case.record is not None else None,
+        "failures": [{"check": f.check, "message": f.message} for f in case.failures],
+    }
